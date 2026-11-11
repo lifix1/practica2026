@@ -6,3 +6,11 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Guides & setup documentation
+*guide*.md
+*GUIDE*.md
+*deploy*.md
+*DEPLOY*.md
+*setup*.md
+*SETUP*.md
