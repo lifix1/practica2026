@@ -9,20 +9,18 @@ declare global {
 export const createPool = () => {
   if (!global._postgresPool) {
     const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL;
-    const isSsl =
-      process.env.SQL_SSL === 'true' ||
-      (connectionString
-        ? connectionString.includes('sslmode=require') ||
-          connectionString.includes('neon.tech') ||
-          connectionString.includes('supabase.co') ||
-          process.env.NODE_ENV === 'production'
-        : false);
+    const isLocal = connectionString
+      ? connectionString.includes('localhost') || connectionString.includes('127.0.0.1')
+      : (process.env.SQL_HOST === 'localhost' || process.env.SQL_HOST === '127.0.0.1');
+
+    // Cloud providers (Neon, Supabase, Cloud SQL, etc.) require SSL unless connecting to local machine
+    const isSsl = process.env.SQL_SSL === 'false' ? false : (!isLocal || process.env.SQL_SSL === 'true');
 
     const commonConfig = {
       max: 10,
       min: 0,
-      idleTimeoutMillis: 10000, // Proactively close idle clients after 10 seconds to avoid server timeouts
-      connectionTimeoutMillis: 10000,
+      idleTimeoutMillis: 10000,
+      connectionTimeoutMillis: 20000, // 20s allows cold-starting serverless databases like Neon to resume
       keepAlive: true,
       keepAliveInitialDelayMillis: 10000,
     };

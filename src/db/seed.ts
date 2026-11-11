@@ -7,9 +7,175 @@ import {
   rooms,
   users,
 } from './schema.ts';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+
+export async function ensureTablesExist() {
+  try {
+    // 1. Create Enums if they don't exist
+    await db.execute(sql`
+      DO $$ BEGIN
+        CREATE TYPE role_enum AS ENUM ('ADMIN', 'ENGINEER', 'USER');
+      EXCEPTION WHEN duplicate_object THEN null; END $$;
+    `);
+
+    await db.execute(sql`
+      DO $$ BEGIN
+        CREATE TYPE data_type_enum AS ENUM ('STRING', 'INTEGER', 'NUMBER', 'BOOLEAN', 'DATE', 'ENUM');
+      EXCEPTION WHEN duplicate_object THEN null; END $$;
+    `);
+
+    await db.execute(sql`
+      DO $$ BEGIN
+        CREATE TYPE writeoff_state_enum AS ENUM ('PREPARING', 'DOCUMENTS_PREPARATION', 'WRITTEN_OFF');
+      EXCEPTION WHEN duplicate_object THEN null; END $$;
+    `);
+
+    await db.execute(sql`
+      DO $$ BEGIN
+        CREATE TYPE issue_state_enum AS ENUM ('ISSUE', 'CRITICAL_ISSUE', 'WEAR_AND_TEAR');
+      EXCEPTION WHEN duplicate_object THEN null; END $$;
+    `);
+
+    // 2. Create tables if they do not exist
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS "user" (
+        id BIGSERIAL PRIMARY KEY,
+        login TEXT NOT NULL UNIQUE,
+        password_hash TEXT NOT NULL,
+        role role_enum NOT NULL,
+        uid TEXT UNIQUE
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS refresh_token (
+        id BIGINT PRIMARY KEY REFERENCES "user"(id) ON DELETE CASCADE,
+        token TEXT NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        valid_until TIMESTAMP NOT NULL
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS room (
+        id BIGSERIAL PRIMARY KEY,
+        number TEXT NOT NULL,
+        floor INTEGER NOT NULL
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS equipment_type (
+        id BIGSERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        parent_id BIGINT
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS additional_field (
+        id BIGSERIAL PRIMARY KEY,
+        type_id BIGINT NOT NULL REFERENCES equipment_type(id) ON DELETE CASCADE,
+        code TEXT NOT NULL,
+        title TEXT NOT NULL,
+        data_type data_type_enum NOT NULL,
+        is_required BOOLEAN NOT NULL DEFAULT FALSE,
+        is_multiple BOOLEAN NOT NULL DEFAULT FALSE,
+        options JSON,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS equipment (
+        id BIGSERIAL PRIMARY KEY,
+        inventory_number TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        type_id BIGINT NOT NULL REFERENCES equipment_type(id),
+        recived TIMESTAMP NOT NULL,
+        initial_cost BIGINT NOT NULL,
+        residual_cost BIGINT NOT NULL,
+        room_id BIGINT NOT NULL REFERENCES room(id),
+        additional_fields JSON NOT NULL DEFAULT '{}'
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS equipment_writeoff (
+        equipment_id BIGINT PRIMARY KEY REFERENCES equipment(id) ON DELETE CASCADE,
+        state writeoff_state_enum NOT NULL,
+        writeoff_date TIMESTAMP
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS equipment_issue (
+        id BIGSERIAL PRIMARY KEY,
+        equipment_id BIGINT NOT NULL REFERENCES equipment(id) ON DELETE CASCADE,
+        state issue_state_enum NOT NULL,
+        description TEXT NOT NULL,
+        broken_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        repaired_at TIMESTAMP
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS notification (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+        equipment_issue_id BIGINT NOT NULL REFERENCES equipment_issue(id) ON DELETE CASCADE,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        is_read BOOLEAN NOT NULL DEFAULT FALSE
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS equipment_transfer (
+        id BIGSERIAL PRIMARY KEY,
+        equipment_id BIGINT NOT NULL REFERENCES equipment(id) ON DELETE CASCADE,
+        issued_to TEXT NOT NULL,
+        issued_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        expected_return_at TIMESTAMP,
+        returned_at TIMESTAMP
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS inventory (
+        id BIGSERIAL PRIMARY KEY,
+        auditor_ext_id BIGINT NOT NULL REFERENCES "user"(id),
+        started_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        finished_at TIMESTAMP
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS verification (
+        id BIGSERIAL PRIMARY KEY,
+        equipment_id BIGINT NOT NULL REFERENCES equipment(id) ON DELETE CASCADE,
+        inventory_id BIGINT NOT NULL REFERENCES inventory(id) ON DELETE CASCADE,
+        verified_at TIMESTAMP
+      );
+    `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS equipment_batch (
+        id BIGSERIAL PRIMARY KEY,
+        code TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        equipment_ids JSON NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        room_id BIGINT
+      );
+    `);
+  } catch (err: any) {
+    console.log('ensureTablesExist notice:', err?.message || err);
+  }
+}
 
 export async function seedDatabaseIfEmpty() {
+  await ensureTablesExist();
+
   try {
     const existingUsers = await db.select().from(users).limit(1);
     if (existingUsers.length > 0) {

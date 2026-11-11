@@ -17,6 +17,10 @@ if (connectionString) {
   console.log(`Using database: ${sqlDbName} on ${sqlHost}:${sqlPort} with user: ${user}`);
 }
 
+const isLocal = connectionString
+  ? connectionString.includes('localhost') || connectionString.includes('127.0.0.1')
+  : (sqlHost === 'localhost' || sqlHost === '127.0.0.1');
+
 export default defineConfig({
   schema: './src/db/schema.ts',
   out: './drizzle',
@@ -25,7 +29,7 @@ export default defineConfig({
   dbCredentials: connectionString
     ? {
         url: connectionString,
-        ssl: false,
+        ssl: isLocal ? false : { rejectUnauthorized: false },
       }
     : {
         host: sqlHost,
@@ -33,7 +37,7 @@ export default defineConfig({
         user: user,
         password: password,
         database: sqlDbName,
-        ssl: false,
+        ssl: isLocal ? false : { rejectUnauthorized: false },
       },
   verbose: true,
 });
