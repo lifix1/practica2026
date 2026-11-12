@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { X, Plus, Trash2, AlertCircle, Save } from 'lucide-react';
+import { X, Plus, Trash2, AlertCircle, Save, ShieldCheck, ShieldAlert } from 'lucide-react';
 import type { Room, EquipmentType, AdditionalField } from '../types/index.ts';
+import { apiFetch } from '../utils/api.ts';
 
 interface EquipmentFormModalProps {
   isOpen: boolean;
@@ -46,7 +47,14 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
       );
       setInitialCost(initialData.initial_cost ?? '');
       setResidualCost(initialData.residual_cost ?? '');
-      setAdditionalFieldsValues(initialData.additional_fields || {});
+      setAdditionalFieldsValues({
+        status: 'Действует',
+        condition: 'Рабочее',
+        accounting_category: 'Дорогостоящее',
+        precious_metals: false,
+        is_under_warranty: false,
+        ...(initialData.additional_fields || {}),
+      });
     } else {
       setInventoryNumber(`INV-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`);
       setName('');
@@ -57,8 +65,15 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
       setRecived(new Date().toISOString().split('T')[0]);
       setInitialCost('');
       setResidualCost('');
-      setAdditionalFieldsValues({});
+      setAdditionalFieldsValues({
+        status: 'Действует',
+        condition: 'Рабочее',
+        accounting_category: 'Дорогостоящее',
+        precious_metals: false,
+        is_under_warranty: false,
+      });
     }
+    setError(null);
   }, [initialData, isOpen, types, rooms]);
 
   // When typeId changes, fetch inherited dynamic fields
@@ -67,15 +82,19 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
       setDynamicFieldDefs([]);
       return;
     }
-    fetch(`/api/equipment-types/${typeId}/fields`)
+    apiFetch(`/api/equipment-types/${typeId}/fields`)
       .then((r) => r.json())
       .then((fields: AdditionalField[]) => {
-        setDynamicFieldDefs(fields);
+        setDynamicFieldDefs(Array.isArray(fields) ? fields : []);
       })
       .catch(console.error);
   }, [typeId]);
 
   if (!isOpen) return null;
+
+  const selectedTypeName =
+    (Array.isArray(types) ? types : []).find((t) => t.id === Number(typeId))?.name || '';
+  const isFurniture = selectedTypeName.toLowerCase().includes('мебель');
 
   const handleDynamicFieldChange = (code: string, value: any) => {
     setAdditionalFieldsValues((prev) => ({
@@ -83,6 +102,20 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
       [code]: value,
     }));
   };
+
+  // Compute live warranty status preview
+  const warrantyUntilVal = additionalFieldsValues.warranty_until || '';
+  let computedWarrantyActive = Boolean(additionalFieldsValues.is_under_warranty);
+  let warrantyExpiredByDate = false;
+  if (warrantyUntilVal) {
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const trimmed = String(warrantyUntilVal).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      computedWarrantyActive = todayStr <= trimmed;
+      warrantyExpiredByDate = !computedWarrantyActive;
+    }
+  }
 
   const handleAddMultipleItem = (code: string, currentItems: any[]) => {
     handleDynamicFieldChange(code, [...(currentItems || []), '']);
@@ -110,6 +143,11 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
     setLoading(true);
     setError(null);
 
+    const payloadFields = {
+      ...additionalFieldsValues,
+      is_under_warranty: warrantyUntilVal ? computedWarrantyActive : Boolean(additionalFieldsValues.is_under_warranty),
+    };
+
     const payload = {
       inventory_number: inventoryNumber.trim(),
       name: name.trim(),
@@ -118,7 +156,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
       recived: new Date(recived).toISOString(),
       initial_cost: Number(initialCost) || 0,
       residual_cost: Number(residualCost) || 0,
-      additional_fields: additionalFieldsValues,
+      additional_fields: payloadFields,
     };
 
     try {
@@ -127,7 +165,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
         : '/api/equipment';
       const method = initialData ? 'PUT' : 'POST';
 
-      const res = await fetch(url, {
+      const res = await apiFetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -150,9 +188,13 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
     }
   };
 
+  const extraCustomFieldDefs = dynamicFieldDefs.filter(
+    (f) => f.code !== 'dimensions' && f.code !== 'color'
+  );
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-6 animate-fadeIn">
-      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-2xl overflow-hidden flex flex-col max-h-[92vh]">
+      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-3xl overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between">
           <div>
@@ -180,7 +222,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
             </div>
           )}
 
-          {/* Basic Fields */}
+          {/* Basic Accounting Fields (A-E + F) */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
@@ -223,7 +265,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="Например: Рабочая станция HP Z440 или Ноутбук Lenovo"
+                placeholder="Например: Центральный стол на 12 мест или Лазерный принтер HP LJ 1020"
                 className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
                 required
               />
@@ -231,7 +273,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Кабинет / Аудитория *
+                Помещение / Аудитория *
               </label>
               <select
                 value={roomId}
@@ -242,7 +284,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
                 <option value="">Выберите кабинет...</option>
                 {(Array.isArray(rooms) ? rooms : []).map((r) => (
                   <option key={r.id} value={r.id}>
-                    Кабинет {r.number} ({r.floor} этаж)
+                    Ауд. {r.number} ({r.floor} этаж)
                   </option>
                 ))}
               </select>
@@ -250,7 +292,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Дата получения на баланс *
+                Дата принятия к учету *
               </label>
               <input
                 type="date"
@@ -288,20 +330,210 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
             </div>
           </div>
 
-          {/* Dynamic Additional Fields Section */}
-          {dynamicFieldDefs.length > 0 && (
+          {/* Department Manual Fields (Columns G-R) */}
+          <div className="border-t border-slate-200 pt-4 space-y-4">
+            <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
+              Характеристики учета кафедры (столбцы G–R)
+            </h4>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Место в помещении
+                </label>
+                <input
+                  type="text"
+                  value={additionalFieldsValues.location_place || ''}
+                  onChange={(e) => handleDynamicFieldChange('location_place', e.target.value)}
+                  placeholder="Напр.: Стол секретаря, Стол 7, Шкаф 3"
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Цвет
+                </label>
+                <input
+                  type="text"
+                  value={additionalFieldsValues.color || ''}
+                  onChange={(e) => handleDynamicFieldChange('color', e.target.value)}
+                  placeholder="серый, черный, белый..."
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div className={isFurniture ? 'sm:col-span-2 p-3 bg-indigo-50/70 border border-indigo-200 rounded-xl' : ''}>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Размеры (Д*Ш*В), см {isFurniture && <span className="text-indigo-700">(для корпусной мебели)</span>}
+                </label>
+                <input
+                  type="text"
+                  value={additionalFieldsValues.dimensions || ''}
+                  onChange={(e) => handleDynamicFieldChange('dimensions', e.target.value)}
+                  placeholder="Например: 560*200*140"
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl font-mono bg-white outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                {isFurniture && (
+                  <p className="text-[11px] text-indigo-700 mt-1">
+                    Указывайте в формате Длина*Ширина*Высота в сантиметрах (например, 560*200*140). Система автоматически разберет габариты для фильтрации.
+                  </p>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Статус
+                </label>
+                <select
+                  value={additionalFieldsValues.status || 'Действует'}
+                  onChange={(e) => handleDynamicFieldChange('status', e.target.value)}
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none bg-white"
+                >
+                  <option value="Действует">Действует</option>
+                  <option value="На хранении">На хранении</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Состояние
+                </label>
+                <select
+                  value={additionalFieldsValues.condition || 'Рабочее'}
+                  onChange={(e) => handleDynamicFieldChange('condition', e.target.value)}
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none bg-white"
+                >
+                  <option value="Рабочее">Рабочее</option>
+                  <option value="Есть нюансы">Есть нюансы</option>
+                  <option value="Вышло из строя (ремонт возможен)">Вышло из строя (ремонт возможен)</option>
+                  <option value="Неремонтопригодно">Неремонтопригодно</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Категория (по бухучету)
+                </label>
+                <select
+                  value={additionalFieldsValues.accounting_category || 'Дорогостоящее'}
+                  onChange={(e) => handleDynamicFieldChange('accounting_category', e.target.value)}
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none bg-white"
+                >
+                  <option value="Дорогостоящее">Дорогостоящее</option>
+                  <option value="Малоценка">Малоценка</option>
+                  <option value="Мягкий инвентарь">Мягкий инвентарь</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Содержание драгметаллов
+                </label>
+                <select
+                  value={additionalFieldsValues.precious_metals ? 'true' : 'false'}
+                  onChange={(e) =>
+                    handleDynamicFieldChange('precious_metals', e.target.value === 'true')
+                  }
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none bg-white"
+                >
+                  <option value="false">Нет</option>
+                  <option value="true">Да</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Гарантия истекает (дата)
+                </label>
+                <input
+                  type="date"
+                  value={warrantyUntilVal}
+                  onChange={(e) => handleDynamicFieldChange('warranty_until', e.target.value || null)}
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Оборудование на гарантии
+                </label>
+                {warrantyUntilVal ? (
+                  <div
+                    className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+                      computedWarrantyActive
+                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                        : 'bg-slate-100 border-slate-200 text-slate-600'
+                    }`}
+                  >
+                    {computedWarrantyActive ? (
+                      <>
+                        <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>Да (определено по дате окончания)</span>
+                      </>
+                    ) : (
+                      <>
+                        <ShieldAlert className="w-4 h-4 text-slate-500 shrink-0" />
+                        <span>Нет ({warrantyExpiredByDate ? 'срок гарантии истёк' : 'не на гарантии'})</span>
+                      </>
+                    )}
+                  </div>
+                ) : (
+                  <select
+                    value={additionalFieldsValues.is_under_warranty ? 'true' : 'false'}
+                    onChange={(e) =>
+                      handleDynamicFieldChange('is_under_warranty', e.target.value === 'true')
+                    }
+                    className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none bg-white"
+                  >
+                    <option value="false">Нет (истекла или неприменимо)</option>
+                    <option value="true">Да</option>
+                  </select>
+                )}
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Описание
+                </label>
+                <input
+                  type="text"
+                  value={additionalFieldsValues.description || ''}
+                  onChange={(e) => handleDynamicFieldChange('description', e.target.value)}
+                  placeholder="Краткое описание характеристик"
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Примечание
+                </label>
+                <input
+                  type="text"
+                  value={additionalFieldsValues.notes || ''}
+                  onChange={(e) => handleDynamicFieldChange('notes', e.target.value)}
+                  placeholder="Дополнительные заметки"
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Dynamic Additional Fields Section (Type-specific e.g. CPU, RAM) */}
+          {extraCustomFieldDefs.length > 0 && (
             <div className="border-t border-slate-200 pt-4 space-y-4">
               <div className="flex items-center justify-between">
                 <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                  Дополнительные характеристики типа (включая унаследованные)
+                  Дополнительные характеристики типа «{selectedTypeName}»
                 </h4>
                 <span className="text-[11px] text-slate-500">
-                  {dynamicFieldDefs.length} полей
+                  {extraCustomFieldDefs.length} полей
                 </span>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {dynamicFieldDefs.map((field) => {
+                {extraCustomFieldDefs.map((field) => {
                   const val = additionalFieldsValues[field.code];
 
                   return (
@@ -318,7 +550,6 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
                         </span>
                       </label>
 
-                      {/* Multiple values input */}
                       {field.is_multiple ? (
                         <div className="space-y-2">
                           {((Array.isArray(val) ? val : []) as any[]).map((subVal, idx) => (

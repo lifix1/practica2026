@@ -2,6 +2,7 @@ import express from 'express';
 import cookieParser from 'cookie-parser';
 import bcrypt from 'bcryptjs';
 import dotenv from 'dotenv';
+import * as XLSX from 'xlsx';
 import { db } from './src/db/index.ts';
 import {
   additionalFields,
@@ -400,7 +401,7 @@ app.put('/api/equipment-types/:id', requireAuth, requireRole('ADMIN'), async (re
         }
         if (visited.has(curr)) break;
         visited.add(curr);
-        const parentRecord = allTypes.find((t) => t.id === curr);
+        const parentRecord = allTypes.find((t: any) => t.id === curr);
         curr = parentRecord?.parent_id ? Number(parentRecord.parent_id) : null;
       }
     }
@@ -621,11 +622,104 @@ app.delete('/api/equipment-types/:typeId/fields/:fieldId', requireAuth, requireR
 // 3. EQUIPMENT ROUTES (CRUD, Filter, Search, QR)
 // ==========================================
 
+// Helper to compute warranty and dimensions dynamically
+function computeDynamicWarranty(fields: any = {}) {
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+  const rawWarrantyUntil = fields.warranty_until || fields['Гарантия истекает'];
+  let formattedUntilStr: string | null = null;
+
+  if (rawWarrantyUntil) {
+    if (typeof rawWarrantyUntil === 'string') {
+      const trimmed = rawWarrantyUntil.trim();
+      const ruMatch = trimmed.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+      const isoMatch = trimmed.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})/);
+      if (ruMatch) {
+        formattedUntilStr = `${ruMatch[3]}-${ruMatch[2].padStart(2, '0')}-${ruMatch[1].padStart(2, '0')}`;
+      } else if (isoMatch && Number(isoMatch[1]) >= 1900 && Number(isoMatch[1]) <= 2150) {
+        formattedUntilStr = `${isoMatch[1]}-${isoMatch[2].padStart(2, '0')}-${isoMatch[3].padStart(2, '0')}`;
+      } else if (/^\d{5}(\.\d+)?$/.test(trimmed)) {
+        const serial = parseFloat(trimmed);
+        if (serial >= 15000 && serial <= 80000) {
+          const d = new Date(Math.round((serial - 25569) * 86400 * 1000));
+          if (!isNaN(d.getTime())) {
+            formattedUntilStr = d.toISOString().split('T')[0];
+          }
+        }
+      } else {
+        const d = new Date(trimmed);
+        if (!isNaN(d.getTime()) && d.getFullYear() >= 1900 && d.getFullYear() <= 2150) {
+          formattedUntilStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        }
+      }
+    } else if (rawWarrantyUntil instanceof Date && !isNaN(rawWarrantyUntil.getTime())) {
+      formattedUntilStr = `${rawWarrantyUntil.getFullYear()}-${String(rawWarrantyUntil.getMonth() + 1).padStart(2, '0')}-${String(rawWarrantyUntil.getDate()).padStart(2, '0')}`;
+    }
+  }
+
+  let isUnderWarranty = false;
+  let warrantyExpired = false;
+
+  if (formattedUntilStr) {
+    // Active through the expiration day; flips to "Нет" on the very next day
+    if (todayStr > formattedUntilStr) {
+      isUnderWarranty = false;
+      warrantyExpired = true;
+    } else {
+      isUnderWarranty = true;
+      warrantyExpired = false;
+    }
+  } else {
+    const flag = fields.is_under_warranty ?? fields['Оборудование на гарантии'];
+    if (flag === true || String(flag).toLowerCase() === 'да' || String(flag).toLowerCase() === 'true') {
+      isUnderWarranty = true;
+      warrantyExpired = false;
+    } else {
+      isUnderWarranty = false;
+      warrantyExpired = true;
+    }
+  }
+
+  const rawDim = fields.dimensions || fields['Размеры (Д*Ш*В), см'];
+  let length_cm: number | null = fields.length_cm ? Number(fields.length_cm) : null;
+  let width_cm: number | null = fields.width_cm ? Number(fields.width_cm) : null;
+  let height_cm: number | null = fields.height_cm ? Number(fields.height_cm) : null;
+
+  if (rawDim && String(rawDim).trim()) {
+    const parts = String(rawDim)
+      .split(/[*xхXХ×]/)
+      .map((s: string) => parseFloat(s.trim().replace(',', '.')))
+      .filter((n: number) => !isNaN(n));
+    length_cm = parts.length >= 1 ? parts[0] : null;
+    width_cm = parts.length >= 2 ? parts[1] : null;
+    height_cm = parts.length >= 3 ? parts[2] : null;
+  } else if (rawDim === '' || rawDim === null) {
+    length_cm = fields.length_cm ? Number(fields.length_cm) : null;
+    width_cm = fields.width_cm ? Number(fields.width_cm) : null;
+    height_cm = fields.height_cm ? Number(fields.height_cm) : null;
+  }
+
+  return {
+    ...fields,
+    dimensions:
+      (rawDim && String(rawDim).trim()) ||
+      (length_cm && width_cm && height_cm ? `${length_cm}*${width_cm}*${height_cm}` : null),
+    length_cm,
+    width_cm,
+    height_cm,
+    warranty_until: formattedUntilStr || fields.warranty_until || null,
+    is_under_warranty: isUnderWarranty,
+    warranty_status_ru: isUnderWarranty ? 'Да' : 'Нет',
+    warranty_expired: warrantyExpired,
+  };
+}
+
 // Equipment List
 app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
   try {
     const page = Math.max(1, Number(req.query.page) || 1);
-    const limit = Math.max(1, Math.min(100, Number(req.query.limit) || 15));
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 15));
     const offset = (page - 1) * limit;
 
     const search = req.query.search ? String(req.query.search).trim() : '';
@@ -640,6 +734,22 @@ app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
     const transferredTo = req.query.transferred_to ? String(req.query.transferred_to).trim() : undefined;
     const customFieldCode = req.query.custom_field_code ? String(req.query.custom_field_code).trim() : undefined;
     const customFieldValue = req.query.custom_field_value ? String(req.query.custom_field_value).trim() : undefined;
+
+    // Additional department filters
+    const colorFilter = req.query.color ? String(req.query.color).trim().toLowerCase() : undefined;
+    const statusFilter = req.query.status ? String(req.query.status).trim() : undefined;
+    const conditionFilter = req.query.condition ? String(req.query.condition).trim() : undefined;
+    const categoryFilter = req.query.accounting_category ? String(req.query.accounting_category).trim() : undefined;
+    const preciousMetalsFilter = req.query.precious_metals ? String(req.query.precious_metals).trim() : undefined;
+    const warrantyFilter = req.query.is_under_warranty ? String(req.query.is_under_warranty).trim() : undefined;
+
+    // Dimensions filters for furniture (length, width, height)
+    const lengthMin = req.query.length_min ? Number(req.query.length_min) : undefined;
+    const lengthMax = req.query.length_max ? Number(req.query.length_max) : undefined;
+    const widthMin = req.query.width_min ? Number(req.query.width_min) : undefined;
+    const widthMax = req.query.width_max ? Number(req.query.width_max) : undefined;
+    const heightMin = req.query.height_min ? Number(req.query.height_min) : undefined;
+    const heightMax = req.query.height_max ? Number(req.query.height_max) : undefined;
 
     // Fetch equipment items with joins
     let query = db
@@ -667,7 +777,7 @@ app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
 
     const conditions: any[] = [];
 
-    // Search filter
+    // Search filter across name, inventory number
     if (search) {
       conditions.push(
         or(
@@ -693,7 +803,7 @@ app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
       conditions.push(lte(equipment.recived, receivedTo));
     }
 
-    // Written-off filter (PDF page 10: "При просмотре списка оборудования списанное оборудование не должно показываться по умолчанию")
+    // Written-off filter
     if (writeoffState) {
       conditions.push(eq(equipmentWriteoffs.state, writeoffState as any));
     } else if (!includeWrittenOff) {
@@ -711,16 +821,32 @@ app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
 
     const allMatched = await query.orderBy(desc(equipment.id));
 
-    // Post-filter for issues, transfers, and custom json fields if requested
-    let filtered = allMatched;
+    // Post-filter with dynamic computed warranty and dimension attributes
+    let filtered = allMatched.map((item: any) => ({
+      ...item,
+      additional_fields: computeDynamicWarranty(item.additional_fields),
+    }));
+
+    if (search) {
+      const q = search.toLowerCase();
+      filtered = filtered.filter((item: any) => {
+        if (item.name?.toLowerCase().includes(q)) return true;
+        if (item.inventory_number?.toLowerCase().includes(q)) return true;
+        if (item.additional_fields?.description?.toLowerCase().includes(q)) return true;
+        if (item.additional_fields?.location_place?.toLowerCase().includes(q)) return true;
+        if (item.additional_fields?.color?.toLowerCase().includes(q)) return true;
+        if (item.additional_fields?.notes?.toLowerCase().includes(q)) return true;
+        return false;
+      });
+    }
 
     if (hasUnrepairedIssue) {
       const unrepairedIssues = await db
         .select({ equipment_id: equipmentIssues.equipment_id })
         .from(equipmentIssues)
         .where(isNull(equipmentIssues.repaired_at));
-      const eqIdsWithIssues = new Set(unrepairedIssues.map((i) => i.equipment_id));
-      filtered = filtered.filter((item) => eqIdsWithIssues.has(item.id));
+      const eqIdsWithIssues = new Set(unrepairedIssues.map((i: any) => i.equipment_id));
+      filtered = filtered.filter((item: any) => eqIdsWithIssues.has(item.id));
     }
 
     if (activeTransferOnly || transferredTo) {
@@ -730,9 +856,9 @@ app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
         .where(isNull(equipmentTransfers.returned_at));
 
       const transferMap = new Map<number, (typeof activeTransfers)[0]>();
-      activeTransfers.forEach((t) => transferMap.set(t.equipment_id, t));
+      activeTransfers.forEach((t: any) => transferMap.set(t.equipment_id, t));
 
-      filtered = filtered.filter((item) => {
+      filtered = filtered.filter((item: any) => {
         const transfer = transferMap.get(item.id);
         if (!transfer) return false;
         if (transferredTo) {
@@ -742,12 +868,100 @@ app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
       });
     }
 
+    // Color filter
+    if (colorFilter) {
+      filtered = filtered.filter((item: any) => {
+        const itemColor = (item.additional_fields?.color || '').toLowerCase();
+        return itemColor.includes(colorFilter);
+      });
+    }
+
+    // Status filter (Действует / На хранении)
+    if (statusFilter && statusFilter !== 'ALL') {
+      filtered = filtered.filter((item: any) => {
+        const itemStatus = (item.additional_fields?.status || '').toLowerCase();
+        return itemStatus === statusFilter.toLowerCase();
+      });
+    }
+
+    // Condition filter (Рабочее / Есть нюансы / Вышло из строя / Неремонтопригодно)
+    if (conditionFilter && conditionFilter !== 'ALL') {
+      filtered = filtered.filter((item: any) => {
+        const itemCond = (item.additional_fields?.condition || '').toLowerCase();
+        return itemCond.includes(conditionFilter.toLowerCase());
+      });
+    }
+
+    // Accounting Category filter (Дорогостоящее / Малоценка / Мягкий инвентарь)
+    if (categoryFilter && categoryFilter !== 'ALL') {
+      filtered = filtered.filter((item: any) => {
+        const itemCat = (item.additional_fields?.accounting_category || '').toLowerCase();
+        return itemCat === categoryFilter.toLowerCase();
+      });
+    }
+
+    // Precious Metals filter (true / false)
+    if (preciousMetalsFilter && preciousMetalsFilter !== 'ALL') {
+      const wantMetals = preciousMetalsFilter === 'true' || preciousMetalsFilter === 'да';
+      filtered = filtered.filter((item: any) => {
+        return Boolean(item.additional_fields?.precious_metals) === wantMetals;
+      });
+    }
+
+    // Warranty filter (true / false with dynamic calculation)
+    if (warrantyFilter && warrantyFilter !== 'ALL') {
+      const wantWarranty = warrantyFilter === 'true' || warrantyFilter === 'да';
+      filtered = filtered.filter((item: any) => {
+        return Boolean(item.additional_fields?.is_under_warranty) === wantWarranty;
+      });
+    }
+
+    // Dimensions filters (length, width, height) - can filter individually or combined!
+    if (lengthMin !== undefined && !isNaN(lengthMin)) {
+      filtered = filtered.filter((item: any) => {
+        const len = item.additional_fields?.length_cm;
+        return len !== null && len !== undefined && len >= lengthMin;
+      });
+    }
+    if (lengthMax !== undefined && !isNaN(lengthMax)) {
+      filtered = filtered.filter((item: any) => {
+        const len = item.additional_fields?.length_cm;
+        return len !== null && len !== undefined && len <= lengthMax;
+      });
+    }
+
+    if (widthMin !== undefined && !isNaN(widthMin)) {
+      filtered = filtered.filter((item: any) => {
+        const w = item.additional_fields?.width_cm;
+        return w !== null && w !== undefined && w >= widthMin;
+      });
+    }
+    if (widthMax !== undefined && !isNaN(widthMax)) {
+      filtered = filtered.filter((item: any) => {
+        const w = item.additional_fields?.width_cm;
+        return w !== null && w !== undefined && w <= widthMax;
+      });
+    }
+
+    if (heightMin !== undefined && !isNaN(heightMin)) {
+      filtered = filtered.filter((item: any) => {
+        const h = item.additional_fields?.height_cm;
+        return h !== null && h !== undefined && h >= heightMin;
+      });
+    }
+    if (heightMax !== undefined && !isNaN(heightMax)) {
+      filtered = filtered.filter((item: any) => {
+        const h = item.additional_fields?.height_cm;
+        return h !== null && h !== undefined && h <= heightMax;
+      });
+    }
+
     if (customFieldCode && customFieldValue) {
-      filtered = filtered.filter((item) => {
+      filtered = filtered.filter((item: any) => {
         const val = item.additional_fields?.[customFieldCode];
         if (val === undefined || val === null) return false;
         if (Array.isArray(val)) {
-          return val.some((v) =>
+          return val.some((v: any) =>
             String(v).toLowerCase().includes(customFieldValue.toLowerCase())
           );
         }
@@ -771,10 +985,183 @@ app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
   }
 });
 
+// Download Department Excel Template matching accountant specification
+// Must be registered BEFORE /api/equipment/:id so Express doesn't treat 'excel-template' as :id
+app.get('/api/equipment/excel-template', (_req, res) => {
+  try {
+    const headers = [
+      'Инвентарный номер',
+      'Наименование',
+      'Дата принятия к учету',
+      'Первоначальная стоимость',
+      'Остаточная стоимость',
+      'Помещение',
+      'Место',
+      'Размеры (Д*Ш*В), см',
+      'Описание',
+      'Цвет',
+      'Тип оборудования',
+      'Статус',
+      'Состояние',
+      'Категория (по бухучету)',
+      'Содержание драгметаллов',
+      'Оборудование на гарантии',
+      'Гарантия истекает',
+      'Примечание',
+    ];
+
+    const sampleRows = [
+      {
+        'Инвентарный номер': 'INV-2019-011',
+        'Наименование': 'Лазерный принтер HP LJ 1020 белый',
+        'Дата принятия к учету': '2019-04-12',
+        'Первоначальная стоимость': 28500,
+        'Остаточная стоимость': 6500,
+        'Помещение': '305',
+        'Место': 'Стол секретаря',
+        'Размеры (Д*Ш*В), см': '',
+        'Описание': 'Лазерный принтер HP LJ 1020 белый',
+        'Цвет': 'белый',
+        'Тип оборудования': 'Периферия',
+        'Статус': 'Действует',
+        'Состояние': 'Рабочее',
+        'Категория (по бухучету)': 'Дорогостоящее',
+        'Содержание драгметаллов': 'Да',
+        'Оборудование на гарантии': 'Нет',
+        'Гарантия истекает': '',
+        'Примечание': '',
+      },
+      {
+        'Инвентарный номер': 'INV-2021-045',
+        'Наименование': 'Центральный стол на 12 мест',
+        'Дата принятия к учету': '2021-08-20',
+        'Первоначальная стоимость': 145000,
+        'Остаточная стоимость': 98000,
+        'Помещение': '302',
+        'Место': 'Центральный стол на 12 мест',
+        'Размеры (Д*Ш*В), см': '560*200*140',
+        'Описание': '',
+        'Цвет': 'серый',
+        'Тип оборудования': 'Корпусная мебель',
+        'Статус': 'Действует',
+        'Состояние': 'Рабочее',
+        'Категория (по бухучету)': 'Дорогостоящее',
+        'Содержание драгметаллов': 'Нет',
+        'Оборудование на гарантии': 'Нет',
+        'Гарантия истекает': '',
+        'Примечание': '',
+      },
+      {
+        'Инвентарный номер': 'INV-2020-032',
+        'Наименование': 'Шкаф 3',
+        'Дата принятия к учету': '2020-11-15',
+        'Первоначальная стоимость': 82000,
+        'Остаточная стоимость': 49000,
+        'Помещение': '302',
+        'Место': 'Шкаф 3',
+        'Размеры (Д*Ш*В), см': '420*80*250',
+        'Описание': '',
+        'Цвет': 'серый',
+        'Тип оборудования': 'Корпусная мебель',
+        'Статус': 'Действует',
+        'Состояние': 'Рабочее',
+        'Категория (по бухучету)': 'Дорогостоящее',
+        'Содержание драгметаллов': 'Нет',
+        'Оборудование на гарантии': 'Нет',
+        'Гарантия истекает': '',
+        'Примечание': '',
+      },
+      {
+        'Инвентарный номер': 'INV-2024-007',
+        'Наименование': 'Компьютер преподавателя HP ProDesk',
+        'Дата принятия к учету': '2024-05-12',
+        'Первоначальная стоимость': 76000,
+        'Остаточная стоимость': 65000,
+        'Помещение': '309',
+        'Место': 'Стол 7',
+        'Размеры (Д*Ш*В), см': '',
+        'Описание': '',
+        'Цвет': '',
+        'Тип оборудования': 'Компьютер',
+        'Статус': 'Действует',
+        'Состояние': 'Рабочее',
+        'Категория (по бухучету)': 'Дорогостоящее',
+        'Содержание драгметаллов': 'Да',
+        'Оборудование на гарантии': 'Да',
+        'Гарантия истекает': '12.05.2027',
+        'Примечание': '',
+      },
+      {
+        'Инвентарный номер': 'INV-2020-071',
+        'Наименование': 'Монитор рабочего места',
+        'Дата принятия к учету': '2020-03-10',
+        'Первоначальная стоимость': 16500,
+        'Остаточная стоимость': 6200,
+        'Помещение': '309',
+        'Место': 'Стол 7',
+        'Размеры (Д*Ш*В), см': '',
+        'Описание': '',
+        'Цвет': '',
+        'Тип оборудования': 'Периферия',
+        'Статус': 'Действует',
+        'Состояние': 'Рабочее',
+        'Категория (по бухучету)': 'Дорогостоящее',
+        'Содержание драгметаллов': 'Да',
+        'Оборудование на гарантии': 'Нет',
+        'Гарантия истекает': '',
+        'Примечание': '',
+      },
+      {
+        'Инвентарный номер': 'INV-2022-194',
+        'Наименование': 'Кресло офисное подъёмно-поворотное',
+        'Дата принятия к учету': '2022-09-18',
+        'Первоначальная стоимость': 9800,
+        'Остаточная стоимость': 5400,
+        'Помещение': '305',
+        'Место': 'Стол 10',
+        'Размеры (Д*Ш*В), см': '',
+        'Описание': 'Кресло офисное подъёмно-поворотное',
+        'Цвет': 'черный',
+        'Тип оборудования': 'Стул (газлифт)',
+        'Статус': 'Действует',
+        'Состояние': 'Рабочее',
+        'Категория (по бухучету)': 'Малоценка',
+        'Содержание драгметаллов': 'Нет',
+        'Оборудование на гарантии': 'Нет',
+        'Гарантия истекает': '',
+        'Примечание': '',
+      },
+    ];
+
+    const ws = XLSX.utils.json_to_sheet(sampleRows, { header: headers });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Оборудование кафедры');
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="shablon-ucheta-kafedry.xlsx"'
+    );
+    res.send(buffer);
+  } catch (error: any) {
+    console.error('Error generating Excel template:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Single Equipment Details
 // Note: "При сканировании QR кода открывается персональная страница с информацией о данном оборудовании. Незарегистрированный пользователь ничего не видит." (PDF page 3)
 // "Пользователь не видит никакой информации о списании." (PDF page 10)
-app.get('/api/equipment/:id', requireAuth, async (req: AuthRequest, res) => {
+app.get('/api/equipment/:id', async (req: AuthRequest, res, next) => {
+  if (!/^\d+$/.test(req.params.id)) {
+    return next();
+  }
+  return requireAuth(req, res, next);
+}, async (req: AuthRequest, res) => {
   try {
     const eqId = Number(req.params.id);
 
@@ -872,6 +1259,7 @@ app.get('/api/equipment/:id', requireAuth, async (req: AuthRequest, res) => {
 
     res.json({
       ...item,
+      additional_fields: computeDynamicWarranty(item.additional_fields),
       writeoffState: isRegularUser ? null : item.writeoffState,
       writeoffDate: isRegularUser ? null : item.writeoffDate,
       activeIssues,
@@ -926,6 +1314,8 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       });
     }
 
+    const normalizedFields = computeDynamicWarranty(additional_fields || {});
+
     const [created] = await db
       .insert(equipment)
       .values({
@@ -936,7 +1326,7 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
         initial_cost: Number(initial_cost) || 0,
         residual_cost: Number(residual_cost) || 0,
         room_id: Number(room_id),
-        additional_fields: additional_fields || {},
+        additional_fields: normalizedFields,
       })
       .returning();
 
@@ -983,7 +1373,9 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
     if (initial_cost !== undefined) updateData.initial_cost = Number(initial_cost);
     if (residual_cost !== undefined) updateData.residual_cost = Number(residual_cost);
     if (room_id) updateData.room_id = Number(room_id);
-    if (additional_fields !== undefined) updateData.additional_fields = additional_fields;
+    if (additional_fields !== undefined) {
+      updateData.additional_fields = computeDynamicWarranty(additional_fields);
+    }
 
     const [updated] = await db
       .update(equipment)
@@ -1003,6 +1395,24 @@ app.delete('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, 
     const eqId = Number(req.params.id);
     await db.delete(equipment).where(eq(equipment.id, eqId));
     res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Bulk Delete Equipment (Admin only)
+app.post('/api/equipment/bulk-delete', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const { equipment_ids } = req.body;
+    if (!Array.isArray(equipment_ids) || equipment_ids.length === 0) {
+      return res.status(400).json({ error: 'Не выбрано ни одной единицы оборудования' });
+    }
+    const ids = equipment_ids.map((id: any) => Number(id)).filter((n: number) => Number.isInteger(n) && n > 0);
+    if (ids.length === 0) {
+      return res.status(400).json({ error: 'Некорректные идентификаторы оборудования' });
+    }
+    await db.delete(equipment).where(inArray(equipment.id, ids));
+    res.json({ success: true, deletedCount: ids.length });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -1038,7 +1448,7 @@ app.post('/api/equipment/qr-docx', requireAuth, requireRole('ADMIN', 'ENGINEER')
       .where(inArray(equipment.id, equipment_ids.map(Number)));
 
     const baseUrl = `${req.protocol}://${req.get('host')}`;
-    const formatted = items.map((i) => ({
+    const formatted = items.map((i: any) => ({
       ...i,
       recivedDate: new Date(i.recived).toLocaleDateString('ru-RU'),
     }));
@@ -1194,7 +1604,7 @@ app.get('/api/equipment/qr-group/:code/docx', requireAuth, requireRole('ADMIN', 
           .where(inArray(equipment.id, ids))
       : [];
 
-    const formatted = items.map((i) => ({
+    const formatted = items.map((i: any) => ({
       ...i,
       recivedDate: i.recived ? new Date(i.recived).toLocaleDateString('ru-RU') : '—',
     }));
@@ -1333,11 +1743,50 @@ app.get('/q/:code', optionalAuth, async (req: AuthRequest, res) => {
 // 5. EXCEL IMPORT & EXPORT
 // ==========================================
 
+// Helper to parse dates from various Excel string/number formats
+function parseExcelDate(val: any): string | null {
+  if (val === undefined || val === null || val === '') return null;
+  if (typeof val === 'number') {
+    if (val >= 15000 && val <= 80000) {
+      const date = new Date(Math.round((val - 25569) * 86400 * 1000));
+      return isNaN(date.getTime()) ? null : date.toISOString().split('T')[0];
+    }
+    return null;
+  }
+  const str = String(val).trim();
+  if (!str) return null;
+
+  // Handle Excel numeric date serialized as string (e.g. "45793", "46519")
+  if (/^\d{5}(\.\d+)?$/.test(str)) {
+    const serial = parseFloat(str);
+    if (serial >= 15000 && serial <= 80000) {
+      const date = new Date(Math.round((serial - 25569) * 86400 * 1000));
+      return isNaN(date.getTime()) ? null : date.toISOString().split('T')[0];
+    }
+  }
+
+  const ruMatch = str.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+  if (ruMatch) {
+    const day = ruMatch[1].padStart(2, '0');
+    const month = ruMatch[2].padStart(2, '0');
+    const year = ruMatch[3];
+    return `${year}-${month}-${day}`;
+  }
+  const isoMatch = str.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})/);
+  if (isoMatch) {
+    return `${isoMatch[1]}-${isoMatch[2].padStart(2, '0')}-${isoMatch[3].padStart(2, '0')}`;
+  }
+  const d = new Date(str);
+  if (!isNaN(d.getTime()) && d.getFullYear() >= 1900 && d.getFullYear() <= 2150) {
+    return d.toISOString().split('T')[0];
+  }
+  return null;
+}
+
+const normalizeHeaderKey = (k: string) =>
+  k.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+
 // Import Equipment from Excel
-// Spec (PDF page 3 & 7):
-// "Первой строкой таблицы Excel идет названия полей таблицы equipment, в последующих строках - значения.
-// Приложение должно проверить, что все обязательные столбцы из таблицы equipment присутствуют в Excel таблице, а также что их типы совпадают.
-// Должна быть предусмотрена возможность загрузки Excel документа со списком оборудования 1 типа с дополнительными полями... Сверить, что в переданных Excel таблицах указаны те поля, что описаны в таблице additional_field... Сверить, что обязательные поля присутствуют и они заполнены... Сверить типы данных."
 app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
     const { rows, type_id } = req.body;
@@ -1348,120 +1797,298 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
     const selectedTypeId = type_id ? Number(type_id) : undefined;
     const errors: string[] = [];
     const createdItems: any[] = [];
+    const newRoomsCreated: string[] = [];
+    const newTypesCreated: string[] = [];
 
     // Cache rooms
     const allRooms = await db.select().from(rooms);
     const roomMap = new Map<string, number>();
-    allRooms.forEach((r) => roomMap.set(r.number.trim().toLowerCase(), r.id));
+    allRooms.forEach((r: any) => roomMap.set(r.number.trim().toLowerCase(), r.id));
 
     // Cache types
     const allTypes = await db.select().from(equipmentTypes);
     const typeMap = new Map<string, number>();
-    allTypes.forEach((t) => typeMap.set(t.name.trim().toLowerCase(), t.id));
+    allTypes.forEach((t: any) => typeMap.set(t.name.trim().toLowerCase(), t.id));
 
-    // Get field definitions if type_id provided
-    let dynamicFieldDefs: any[] = [];
-    if (selectedTypeId) {
-      dynamicFieldDefs = await getAllAdditionalFieldsForType(selectedTypeId);
-    }
+    // Track ALL existing inventory numbers in DB AND inside this batch to prevent UNIQUE collisions
+    const existingInvRows = await db.select({ inv: equipment.inventory_number }).from(equipment);
+    const usedInvNums = new Set<string>(existingInvRows.map((r: any) => String(r.inv).trim()));
+
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index];
-      const rowNum = index + 2; // Row 1 is header
 
-      const invNum = row.inventory_number ? String(row.inventory_number).trim() : '';
-      const name = row.name ? String(row.name).trim() : '';
-      const recivedStr = row.recived || row.received;
-      const initialCost = Number(row.initial_cost);
-      const residualCost = Number(row.residual_cost);
+      // Build normalized key lookup map for current row (handles Excel \n wrapped headers)
+      const normalizedRow = new Map<string, any>();
+      for (const rawKey of Object.keys(row)) {
+        normalizedRow.set(normalizeHeaderKey(rawKey), row[rawKey]);
+      }
 
-      if (!invNum) {
-        errors.push(`Строка ${rowNum}: отсутствует обязательное поле inventory_number`);
+      // Helper to extract value by multiple alternative keys (Russian & English)
+      const getVal = (...keys: string[]) => {
+        for (const k of keys) {
+          const nk = normalizeHeaderKey(k);
+          const v = normalizedRow.get(nk);
+          if (v !== undefined && v !== null && String(v).trim() !== '') {
+            return String(v).trim();
+          }
+        }
+        return '';
+      };
+
+      // Extract fields
+      let invNum = getVal(
+        'inventory_number',
+        'Инвентарный номер',
+        'Инвентарный №',
+        'Инв. номер',
+        'Инв номер',
+        'Инв. №',
+        '№ п/п'
+      );
+      let name = getVal(
+        'name',
+        'Наименование (по бухгалтерии)',
+        'Наименование',
+        'Наименование объекта',
+        'Название'
+      );
+      const description = getVal('description', 'Описание', 'Краткое описание');
+      const locationPlace = getVal('location_place', 'Место', 'Местоположение');
+      const dimensionsStr = getVal('dimensions', 'Размеры (Д*Ш*В), см', 'Размеры, см', 'Размеры');
+      const color = getVal('color', 'Цвет');
+      const typeNameRaw = getVal('type_name', 'Тип оборудования', 'Тип');
+      const statusRaw = getVal('status', 'Статус');
+      const conditionRaw = getVal('condition', 'Состояние');
+      const categoryRaw = getVal('accounting_category', 'Категория (по бухучету)', 'Категория');
+      const preciousRaw = getVal('precious_metals', 'Содержание драгметаллов', 'Драгметаллы');
+      const warrantyRaw = getVal('is_under_warranty', 'Оборудование на гарантии', 'На гарантии');
+      const warrantyUntilRaw = getVal('warranty_until', 'Гарантия истекает', 'Срок гарантии до');
+      const notes = getVal('notes', 'Примечание', 'Примечания');
+      const quantityRaw = getVal('Количество', 'Кол-во', 'quantity');
+
+      const roomStr = getVal('room_number', 'room_id', 'Помещение', 'Кабинет', 'Аудитория');
+      const recivedRaw = getVal(
+        'recived',
+        'received',
+        'Дата принятия к учету',
+        'Дата ввода в эксплуатацию',
+        'Дата ввода',
+        'Дата принятия',
+        'Дата получения',
+        'Дата'
+      );
+      const initialCostRaw = getVal(
+        'initial_cost',
+        'Первоначальная стоимость',
+        'Балансовая стоимость',
+        'Стоимость'
+      );
+      const residualCostRaw = getVal('residual_cost', 'Остаточная стоимость');
+
+      // Auto-fallback for Name: use Description or Type if name is omitted
+      if (!name) {
+        name = description || (typeNameRaw ? `${typeNameRaw} (${roomStr ? `ауд. ${roomStr}` : 'б/н'})` : '');
       }
       if (!name) {
-        errors.push(`Строка ${rowNum}: отсутствует обязательное поле name`);
-      }
-      if (!recivedStr || isNaN(Date.parse(String(recivedStr)))) {
-        errors.push(`Строка ${rowNum}: неверный формат даты получения recived (ожидается дата, напр. 2021-05-15)`);
-      }
-      if (isNaN(initialCost)) {
-        errors.push(`Строка ${rowNum}: initial_cost должно быть числом`);
-      }
-      if (isNaN(residualCost)) {
-        errors.push(`Строка ${rowNum}: residual_cost должно быть числом`);
+        name = `Материальная ценность №${index + 1}`;
       }
 
-      // Room resolving
+      // Auto-fallback for Inventory Number: auto-generate if omitted
+      if (!invNum) {
+        invNum = `INV-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
+      }
+
+      // Ensure unique inventory_number across DB AND earlier rows in this Excel file (e.g. shared kit numbers)
+      if (usedInvNums.has(invNum)) {
+        let suffix = 2;
+        while (usedInvNums.has(`${invNum}-${suffix}`)) {
+          suffix++;
+        }
+        invNum = `${invNum}-${suffix}`;
+      }
+      usedInvNums.add(invNum);
+
+      // Date parsing
+      let recivedDate = new Date();
+      if (recivedRaw) {
+        const parsed = parseExcelDate(recivedRaw);
+        if (parsed) {
+          recivedDate = new Date(`${parsed}T00:00:00Z`);
+        }
+      }
+
+      const initialCost = parseFloat(initialCostRaw.replace(/\s+/g, '').replace(',', '.')) || 0;
+      const residualCost = parseFloat(residualCostRaw.replace(/\s+/g, '').replace(',', '.')) || 0;
+
+      // Room resolving or auto-creation
       let matchedRoomId: number | undefined;
-      if (row.room_id) {
-        matchedRoomId = Number(row.room_id);
-      } else if (row.room_number) {
-        matchedRoomId = roomMap.get(String(row.room_number).trim().toLowerCase());
-      }
-      if (!matchedRoomId) {
-        errors.push(`Строка ${rowNum}: кабинет (room_id / room_number '${row.room_number || row.room_id}') не найден`);
+      const cleanRoomStr = roomStr || '308';
+      const cleanRoomKey = cleanRoomStr.toLowerCase();
+
+      if (roomMap.has(cleanRoomKey)) {
+        matchedRoomId = roomMap.get(cleanRoomKey);
+      } else {
+        const parsedNum = parseInt(cleanRoomStr.replace(/\D/g, ''), 10) || 1;
+        const floor = Math.max(1, Math.min(10, Math.floor(parsedNum / 100) || 1));
+        const [newRoom] = await db
+          .insert(rooms)
+          .values({ number: cleanRoomStr, floor })
+          .returning();
+        matchedRoomId = newRoom.id;
+        roomMap.set(cleanRoomKey, newRoom.id);
+        newRoomsCreated.push(cleanRoomStr);
       }
 
-      // Type resolving
-      let itemTypeId = selectedTypeId;
-      if (!itemTypeId) {
-        if (row.type_id) itemTypeId = Number(row.type_id);
-        else if (row.type_name) itemTypeId = typeMap.get(String(row.type_name).trim().toLowerCase());
-      }
-      if (!itemTypeId) {
-        errors.push(`Строка ${rowNum}: тип оборудования (type_id / type_name '${row.type_name || row.type_id}') не найден`);
-      }
+      // Type resolving or auto-creation
+      let matchedTypeId = selectedTypeId;
+      if (!matchedTypeId) {
+        let lookupType = (typeNameRaw || 'Периферия').toLowerCase();
+        if (lookupType.includes('компьют') || lookupType === 'пк') lookupType = 'компьютер';
+        else if (lookupType.includes('ноут')) lookupType = 'ноутбук';
+        else if (lookupType.includes('монитор')) lookupType = 'монитор';
+        else if (lookupType.includes('корпусн') || lookupType.includes('мебель') || lookupType.includes('шкаф') || lookupType.includes('стол')) lookupType = 'корпусная мебель';
+        else if (lookupType.includes('газлифт')) lookupType = 'стулья (газлифт)';
+        else if (lookupType.includes('iso')) lookupType = 'стулья iso';
+        else if (lookupType.includes('стул')) lookupType = 'стулья прочие';
+        else if (lookupType.includes('жалюзи')) lookupType = 'жалюзи';
+        else if (lookupType.includes('сетев') || lookupType.includes('коммутатор')) lookupType = 'сетевое оборудование';
+        else if (lookupType.includes('программн') || lookupType === 'по') lookupType = 'по (программное обеспечение)';
+        else if (lookupType.includes('перифер') || lookupType.includes('принтер') || lookupType.includes('сканер')) lookupType = 'периферия';
 
-      // Dynamic fields extraction
-      const additional_fields: Record<string, any> = {};
-      if (itemTypeId && dynamicFieldDefs.length > 0) {
-        for (const f of dynamicFieldDefs) {
-          if (row[f.code] !== undefined && row[f.code] !== '') {
-            let val = row[f.code];
-            if (f.is_multiple && typeof val === 'string') {
-              val = val.split(',').map((s) => s.trim()).filter(Boolean);
-            }
-            if (f.data_type === 'INTEGER' || f.data_type === 'NUMBER') {
-              val = Number(val);
-            } else if (f.data_type === 'BOOLEAN') {
-              val = String(val).toLowerCase() === 'true' || val === 1 || val === '1';
-            }
-            additional_fields[f.code] = val;
+        for (const [key, id] of typeMap.entries()) {
+          if (key.includes(lookupType) || lookupType.includes(key)) {
+            matchedTypeId = id;
+            break;
           }
         }
 
-        const dynamicValidation = await validateAdditionalFields(itemTypeId, additional_fields);
-        if (!dynamicValidation.isValid) {
-          dynamicValidation.errors.forEach((err) => {
-            errors.push(`Строка ${rowNum}: ${err}`);
-          });
+        if (!matchedTypeId) {
+          const typeDisplayName = typeNameRaw || 'Периферия';
+          const [newType] = await db
+            .insert(equipmentTypes)
+            .values({ name: typeDisplayName, parent_id: null })
+            .returning();
+          matchedTypeId = newType.id;
+          typeMap.set(typeDisplayName.toLowerCase(), newType.id);
+          newTypesCreated.push(typeDisplayName);
         }
       }
 
-      // Check unique inventory_number
-      if (invNum) {
-        const dup = await db
-          .select()
-          .from(equipment)
-          .where(eq(equipment.inventory_number, invNum))
-          .limit(1);
-        if (dup.length > 0) {
-          errors.push(`Строка ${rowNum}: инвентарный номер "${invNum}" уже существует в БД`);
+      // Parse dimensions (length, width, height)
+      let length_cm: number | null = null;
+      let width_cm: number | null = null;
+      let height_cm: number | null = null;
+
+      if (dimensionsStr) {
+        const parts = dimensionsStr
+          .split(/[*xхXХ×]/)
+          .map((s) => parseFloat(s.trim().replace(',', '.')))
+          .filter((n) => !isNaN(n));
+        if (parts.length >= 1) length_cm = parts[0];
+        if (parts.length >= 2) width_cm = parts[1];
+        if (parts.length >= 3) height_cm = parts[2];
+      }
+
+      // Parse warranty expiry
+      let formattedWarrantyUntil: string | null = null;
+      let isUnderWarranty = false;
+
+      if (warrantyUntilRaw) {
+        formattedWarrantyUntil = parseExcelDate(warrantyUntilRaw);
+      }
+
+      if (formattedWarrantyUntil) {
+        isUnderWarranty = todayStr <= formattedWarrantyUntil;
+      } else {
+        const lowerW = warrantyRaw.toLowerCase();
+        isUnderWarranty = lowerW === 'да' || lowerW === 'true' || lowerW === '1';
+      }
+
+      // Precious metals boolean
+      const preciousMetals =
+        preciousRaw.toLowerCase() === 'да' ||
+        preciousRaw.toLowerCase() === 'true' ||
+        preciousRaw === '1';
+
+      // Status & condition normalization
+      let status = statusRaw || 'Действует';
+      if (status.toLowerCase().includes('хранен')) status = 'На хранении';
+      else status = 'Действует';
+
+      let condition = conditionRaw || 'Рабочее';
+      if (condition.toLowerCase().includes('нюанс')) condition = 'Есть нюансы';
+      else if (condition.toLowerCase().includes('неремонт')) condition = 'Неремонтопригодно';
+      else if (condition.toLowerCase().includes('вышл') || condition.toLowerCase().includes('ремонт')) condition = 'Вышло из строя (ремонт возможен)';
+      else condition = 'Рабочее';
+
+      let accounting_category = categoryRaw || 'Дорогостоящее';
+      if (accounting_category.toLowerCase().includes('малоцен')) accounting_category = 'Малоценка';
+      else if (accounting_category.toLowerCase().includes('мягк')) accounting_category = 'Мягкий инвентарь';
+      else accounting_category = 'Дорогостоящее';
+
+      const additional_fields: Record<string, any> = {
+        location_place: locationPlace || null,
+        dimensions: dimensionsStr || null,
+        length_cm,
+        width_cm,
+        height_cm,
+        description: description || null,
+        color: color || null,
+        status,
+        condition,
+        accounting_category,
+        precious_metals: preciousMetals,
+        is_under_warranty: isUnderWarranty,
+        warranty_until: formattedWarrantyUntil,
+        notes: notes || null,
+      };
+      if (quantityRaw && Number(quantityRaw) > 1) {
+        additional_fields.quantity = Number(quantityRaw);
+      }
+
+      // Copy only genuinely extra custom columns (skip already-mapped accounting & department headers)
+      const reservedKeys = new Set([
+        'inventory_number', 'инвентарный номер', 'инвентарный №', 'инв. номер', 'инв номер', 'инв. №', '№ п/п',
+        'name', 'наименование (по бухгалтерии)', 'наименование', 'наименование объекта', 'название',
+        'recived', 'received', 'дата принятия к учету', 'дата ввода в эксплуатацию', 'дата ввода', 'дата принятия', 'дата получения', 'дата',
+        'initial_cost', 'первоначальная стоимость', 'балансовая стоимость', 'стоимость',
+        'residual_cost', 'остаточная стоимость',
+        'количество', 'кол-во', 'quantity',
+        'room_number', 'room_id', 'помещение', 'кабинет', 'аудитория',
+        'location_place', 'место', 'местоположение',
+        'dimensions', 'размеры', 'размеры (д*ш*в), см', 'размеры, см',
+        'description', 'описание', 'краткое описание',
+        'color', 'цвет',
+        'type_name', 'тип оборудования', 'тип',
+        'status', 'статус',
+        'condition', 'состояние',
+        'accounting_category', 'категория', 'категория (по бухучету)',
+        'precious_metals', 'содержание драгметаллов', 'драгметаллы',
+        'is_under_warranty', 'оборудование на гарантии', 'на гарантии',
+        'warranty_until', 'гарантия истекает', 'срок гарантии до',
+        'notes', 'примечание', 'примечания'
+      ]);
+
+      for (const k of Object.keys(row)) {
+        const nk = normalizeHeaderKey(k);
+        if (!reservedKeys.has(nk) && row[k] !== undefined && row[k] !== '') {
+          additional_fields[k] = row[k];
         }
       }
 
-      if (errors.length === 0 && itemTypeId && matchedRoomId) {
-        createdItems.push({
-          inventory_number: invNum,
-          name,
-          type_id: itemTypeId,
-          recived: new Date(recivedStr),
-          initial_cost: initialCost,
-          residual_cost: residualCost,
-          room_id: matchedRoomId,
-          additional_fields,
-        });
-      }
+      createdItems.push({
+        inventory_number: invNum,
+        name,
+        type_id: matchedTypeId,
+        recived: recivedDate,
+        initial_cost: Math.round(initialCost),
+        residual_cost: Math.round(residualCost),
+        room_id: matchedRoomId,
+        additional_fields,
+      });
     }
 
     if (errors.length > 0) {
@@ -1471,15 +2098,19 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       });
     }
 
-    // Insert all items
-    for (const item of createdItems) {
-      await db.insert(equipment).values(item);
-    }
+    // Insert all items atomically inside a transaction
+    await db.transaction(async (tx: any) => {
+      for (const item of createdItems) {
+        await tx.insert(equipment).values(item);
+      }
+    });
 
     res.status(201).json({
       success: true,
-      message: `Успешно импортировано ${createdItems.length} единиц оборудования`,
+      message: `Успешно импортировано ${createdItems.length} единиц оборудования!`,
       count: createdItems.length,
+      createdRooms: newRoomsCreated,
+      createdTypes: newTypesCreated,
     });
   } catch (error: any) {
     console.error('Import error:', error);
@@ -1642,7 +2273,7 @@ async function handleGenerateActRequest(req: any, res: any) {
     const randomSuffix = Math.floor(1000 + Math.random() * 9000);
     const currentYear = new Date().getFullYear();
     const actNum = `СП-${currentYear}-${randomSuffix}`;
-    const formatted = items.map((i) => ({
+    const formatted = items.map((i: any) => ({
       ...i,
       recivedDate: i.recived ? new Date(i.recived).toLocaleDateString('ru-RU') : '—',
     }));
@@ -2086,7 +2717,7 @@ app.get('/api/inventory/current', requireAuth, async (req: AuthRequest, res) => 
       .where(eq(verifications.inventory_id, active.id));
 
     const totalCount = allVerifs.length;
-    const verifiedCount = allVerifs.filter((v) => v.verified_at !== null).length;
+    const verifiedCount = allVerifs.filter((v: any) => v.verified_at !== null).length;
 
     res.json({
       activeInventory: {

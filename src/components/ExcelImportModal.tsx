@@ -1,7 +1,16 @@
 import React, { useState } from 'react';
-import { X, Upload, FileSpreadsheet, Download, AlertCircle, CheckCircle2 } from 'lucide-react';
+import {
+  X,
+  Upload,
+  FileSpreadsheet,
+  Download,
+  AlertCircle,
+  CheckCircle2,
+  Info,
+} from 'lucide-react';
 import * as XLSX from 'xlsx';
 import type { EquipmentType } from '../types/index.ts';
+import { apiFetch } from '../utils/api.ts';
 
 interface ExcelImportModalProps {
   isOpen: boolean;
@@ -21,59 +30,103 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
   const [fileName, setFileName] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
-  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [importResult, setImportResult] = useState<{
+    message: string;
+    createdRooms?: string[];
+    createdTypes?: string[];
+  } | null>(null);
 
   if (!isOpen) return null;
 
-  // Generate and download Excel template
+  const previewKeys = Object.keys(parsedRows[0] || {});
+
+  // Download full department template (columns A-R) or type-specific template
   const handleDownloadTemplate = async () => {
-    let headers = [
-      'inventory_number',
-      'name',
-      'recived',
-      'initial_cost',
-      'residual_cost',
-      'room_number',
-    ];
+    try {
+      if (!selectedTypeId) {
+        const res = await apiFetch('/api/equipment/excel-template');
+        if (!res.ok) throw new Error('Не удалось скачать шаблон с сервера');
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'shablon-ucheta-kafedry.xlsx';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        window.URL.revokeObjectURL(url);
+        return;
+      }
 
-    if (!selectedTypeId) {
-      headers.push('type_name');
-    }
+      const selectedType = types.find((t) => t.id === selectedTypeId);
+      const headers = [
+        'Инвентарный номер',
+        'Наименование',
+        'Дата принятия к учету',
+        'Первоначальная стоимость',
+        'Остаточная стоимость',
+        'Помещение',
+        'Место',
+        'Размеры (Д*Ш*В), см',
+        'Описание',
+        'Цвет',
+        'Статус',
+        'Состояние',
+        'Категория (по бухучету)',
+        'Содержание драгметаллов',
+        'Оборудование на гарантии',
+        'Гарантия истекает',
+        'Примечание',
+      ];
 
-    // If specific type selected, append its dynamic fields!
-    if (selectedTypeId) {
+      let extraFields: any[] = [];
       try {
-        const res = await fetch(`/api/equipment-types/${selectedTypeId}/fields`);
+        const res = await apiFetch(`/api/equipment-types/${selectedTypeId}/fields`);
         const fields = await res.json();
-        fields.forEach((f: any) => headers.push(f.code));
+        if (Array.isArray(fields)) {
+          extraFields = fields.filter(
+            (f) => f.code !== 'dimensions' && f.code !== 'color'
+          );
+          extraFields.forEach((f) => headers.push(f.code));
+        }
       } catch (e) {
         console.error(e);
       }
+
+      const isFurniture = selectedType?.name.toLowerCase().includes('мебель');
+      const sampleRow: Record<string, any> = {
+        'Инвентарный номер': `INV-2026-${Math.floor(100 + Math.random() * 900)}`,
+        'Наименование': isFurniture
+          ? 'Шкаф для документов'
+          : `Образец (${selectedType?.name || 'оборудование'})`,
+        'Дата принятия к учету': '2026-01-15',
+        'Первоначальная стоимость': 45000,
+        'Остаточная стоимость': 32000,
+        'Помещение': '308',
+        'Место': 'Стол 1',
+        'Размеры (Д*Ш*В), см': isFurniture ? '120*45*200' : '',
+        'Описание': '',
+        'Цвет': 'серый',
+        'Статус': 'Действует',
+        'Состояние': 'Рабочее',
+        'Категория (по бухучету)': 'Дорогостоящее',
+        'Содержание драгметаллов': isFurniture ? 'Нет' : 'Да',
+        'Оборудование на гарантии': 'Да',
+        'Гарантия истекает': '15.01.2028',
+        'Примечание': '',
+      };
+
+      extraFields.forEach((f) => {
+        sampleRow[f.code] = '';
+      });
+
+      const ws = XLSX.utils.json_to_sheet([sampleRow], { header: headers });
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Оборудование');
+      XLSX.writeFile(wb, `shablon-importa-type-${selectedTypeId}.xlsx`);
+    } catch (err: any) {
+      setErrors([err.message || 'Ошибка при скачивании шаблона']);
     }
-
-    const sampleRow: Record<string, any> = {
-      inventory_number: `INV-2026-${Math.floor(100 + Math.random() * 900)}`,
-      name: 'Пример наименования оборудования',
-      recived: '2026-01-15',
-      initial_cost: 50000,
-      residual_cost: 35000,
-      room_number: '308',
-    };
-
-    if (!selectedTypeId) {
-      sampleRow.type_name = 'Компьютер';
-    }
-
-    const ws = XLSX.utils.json_to_sheet([sampleRow], { header: headers });
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Оборудование');
-
-    XLSX.writeFile(
-      wb,
-      selectedTypeId
-        ? `shablon-importa-type-${selectedTypeId}.xlsx`
-        : 'shablon-importa-oborudovaniya.xlsx'
-    );
   };
 
   // Handle file select
@@ -83,22 +136,26 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
 
     setFileName(file.name);
     setErrors([]);
-    setSuccessMsg(null);
+    setImportResult(null);
 
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
-        const bstr = evt.target?.result;
-        const wb = XLSX.read(bstr, { type: 'binary' });
+        const dataBuffer = evt.target?.result;
+        const wb = XLSX.read(dataBuffer, { type: 'array' });
         const wsname = wb.SheetNames[0];
         const ws = wb.Sheets[wsname];
         const data = XLSX.utils.sheet_to_json(ws, { defval: '' });
-        setParsedRows(data);
+        // Filter out completely blank trailing rows
+        const nonEmptyRows = (data as any[]).filter((row) =>
+          Object.values(row).some((val) => val !== undefined && val !== null && String(val).trim() !== '')
+        );
+        setParsedRows(nonEmptyRows);
       } catch (err: any) {
         setErrors(['Не удалось прочитать Excel файл: ' + err.message]);
       }
     };
-    reader.readAsBinaryString(file);
+    reader.readAsArrayBuffer(file);
   };
 
   // Submit to server
@@ -110,10 +167,10 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
 
     setLoading(true);
     setErrors([]);
-    setSuccessMsg(null);
+    setImportResult(null);
 
     try {
-      const res = await fetch('/api/equipment/import-excel', {
+      const res = await apiFetch('/api/equipment/import-excel', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -132,11 +189,15 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
         return;
       }
 
-      setSuccessMsg(resData.message || 'Импорт успешно завершен!');
+      setImportResult({
+        message: resData.message || 'Импорт успешно завершен!',
+        createdRooms: resData.createdRooms,
+        createdTypes: resData.createdTypes,
+      });
       onSuccess();
       setTimeout(() => {
         onClose();
-      }, 1500);
+      }, 1800);
     } catch (err: any) {
       setErrors([err.message]);
     } finally {
@@ -146,7 +207,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-6 animate-fadeIn">
-      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-2xl overflow-hidden flex flex-col max-h-[90vh]">
+      <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-3xl overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="px-6 py-4 bg-emerald-900 text-white flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -155,10 +216,10 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
             </div>
             <div>
               <h3 className="font-bold text-base sm:text-lg">
-                Заполнение списка оборудования из Excel
+                Импорт таблицы учета кафедры из Excel
               </h3>
               <p className="text-xs text-emerald-200">
-                Автоматическая валидация обязательных столбцов и типов данных
+                Поддержка выгрузки бухгалтерии (A–E) и дополнительных столбцов кафедры (F–R)
               </p>
             </div>
           </div>
@@ -171,23 +232,27 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
         </div>
 
         {/* Content */}
-        <div className="p-6 overflow-y-auto space-y-5">
-          {/* Scenario & Options */}
+        <div className="p-6 overflow-y-auto space-y-4">
+          {/* Scenario & Template Download */}
           <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl space-y-3">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
+            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
+              <div className="flex-1">
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Импорт для конкретного типа (с доп. полями) или общий:
+                  Режим импорта по типу оборудования:
                 </label>
                 <select
                   value={selectedTypeId}
-                  onChange={(e) => setSelectedTypeId(e.target.value === '' ? '' : Number(e.target.value))}
-                  className="text-xs p-2 border border-slate-300 rounded-lg outline-none bg-white min-w-[240px]"
+                  onChange={(e) =>
+                    setSelectedTypeId(e.target.value === '' ? '' : Number(e.target.value))
+                  }
+                  className="w-full text-xs p-2 border border-slate-300 rounded-lg outline-none bg-white"
                 >
-                  <option value="">Все типы оборудования (общий импорт)</option>
+                  <option value="">
+                    Все типы (тип берется из столбца «Тип оборудования» таблицы)
+                  </option>
                   {(Array.isArray(types) ? types : []).map((t) => (
                     <option key={t.id} value={t.id}>
-                      Только «{t.name}» (с проверкой доп. характеристик)
+                      Только «{t.name}» (принудительно для всех строк)
                     </option>
                   ))}
                 </select>
@@ -196,11 +261,37 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
               <button
                 type="button"
                 onClick={handleDownloadTemplate}
-                className="px-3 py-2 bg-white border border-slate-300 hover:bg-slate-100 text-slate-700 text-xs font-semibold rounded-xl inline-flex items-center gap-1.5 shadow-2xs transition-colors shrink-0"
+                className="px-3.5 py-2 bg-white border border-emerald-300 hover:bg-emerald-50 text-emerald-800 text-xs font-semibold rounded-xl inline-flex items-center gap-1.5 shadow-2xs transition-colors shrink-0"
               >
                 <Download className="w-4 h-4 text-emerald-600" />
-                Скачать шаблон (.xlsx)
+                <span>
+                  {selectedTypeId
+                    ? 'Скачать шаблон типа (.xlsx)'
+                    : 'Скачать шаблон таблицы кафедры (.xlsx)'}
+                </span>
               </button>
+            </div>
+
+            {/* Columns legend */}
+            <div className="p-3 bg-white border border-slate-200 rounded-xl text-[11px] text-slate-600 space-y-1.5">
+              <div className="flex items-center gap-1.5 font-semibold text-slate-800">
+                <Info className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                <span>Распознаваемые столбцы таблицы Excel (русские и английские заголовки):</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+                <div>
+                  <span className="font-semibold text-slate-700">Бухучёт (A–E):</span>{' '}
+                  Инвентарный номер, Наименование, Дата принятия к учету, Первоначальная стоимость, Остаточная стоимость
+                </div>
+                <div>
+                  <span className="font-semibold text-slate-700">Размещение и габариты (F–J):</span>{' '}
+                  Помещение (создается автоматически), Место, Размеры (Д*Ш*В), см, Описание, Цвет
+                </div>
+                <div className="sm:col-span-2">
+                  <span className="font-semibold text-slate-700">Классификация и гарантия (K–R):</span>{' '}
+                  Тип оборудования, Статус (Действует / На хранении), Состояние, Категория (по бухучету), Содержание драгметаллов (Да/Нет), Оборудование на гарантии, Гарантия истекает (ДД.ММ.ГГГГ — статус обновится на «Нет» автоматически на следующий день после даты), Примечание.
+                </div>
+              </div>
             </div>
           </div>
 
@@ -211,7 +302,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
               Выберите или перетащите файл Excel (.xlsx, .xls)
             </div>
             <p className="text-[11px] text-slate-400 mb-3">
-              Первая строка файла должна содержать заголовки полей таблицы
+              Первая строка листа должна содержать названия столбцов (как в шаблоне кафедры)
             </p>
             <label className="inline-block px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold cursor-pointer shadow-xs transition-colors">
               Выбрать файл
@@ -224,7 +315,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
             </label>
             {fileName && (
               <div className="mt-3 text-xs font-semibold text-emerald-700">
-                Загружен файл: {fileName} ({parsedRows.length} записей)
+                Загружен файл: {fileName} ({parsedRows.length} непустых строк)
               </div>
             )}
           </div>
@@ -234,7 +325,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
             <div className="p-4 bg-red-50 border border-red-200 rounded-xl space-y-1 max-h-48 overflow-y-auto">
               <div className="flex items-center gap-1.5 text-xs font-bold text-red-800 mb-1">
                 <AlertCircle className="w-4 h-4 shrink-0" />
-                Обнаружены ошибки валидации Excel ({errors.length}):
+                Обнаружены ошибки при импорте ({errors.length}):
               </div>
               {errors.map((err, i) => (
                 <div key={i} className="text-[11px] text-red-700 leading-tight">
@@ -244,10 +335,22 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
             </div>
           )}
 
-          {successMsg && (
-            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-800 text-xs font-semibold flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-              <span>{successMsg}</span>
+          {importResult && (
+            <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-900 text-xs space-y-1">
+              <div className="font-bold flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{importResult.message}</span>
+              </div>
+              {Array.isArray(importResult.createdRooms) && importResult.createdRooms.length > 0 && (
+                <div className="text-[11px] text-emerald-800 pl-6">
+                  Автоматически добавлены новые помещения: {importResult.createdRooms.join(', ')}
+                </div>
+              )}
+              {Array.isArray(importResult.createdTypes) && importResult.createdTypes.length > 0 && (
+                <div className="text-[11px] text-emerald-800 pl-6">
+                  Автоматически добавлены новые типы: {importResult.createdTypes.join(', ')}
+                </div>
+              )}
             </div>
           )}
 
@@ -255,14 +358,14 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
           {parsedRows.length > 0 && (
             <div>
               <h4 className="text-xs font-bold text-slate-700 mb-2">
-                Предпросмотр данных ({parsedRows.length} строк):
+                Предпросмотр первых строк ({Math.min(5, parsedRows.length)} из {parsedRows.length}):
               </h4>
-              <div className="max-h-40 overflow-auto border border-slate-200 rounded-xl text-[11px]">
-                <table className="w-full text-left">
-                  <thead className="bg-slate-100 border-b border-slate-200 text-slate-600 sticky top-0">
+              <div className="max-h-48 overflow-auto border border-slate-200 rounded-xl text-[11px]">
+                <table className="w-full text-left border-collapse">
+                  <thead className="bg-slate-100 border-b border-slate-200 text-slate-700 sticky top-0">
                     <tr>
-                      {Object.keys(parsedRows[0] || {}).map((k) => (
-                        <th key={k} className="p-2 font-mono">
+                      {previewKeys.map((k) => (
+                        <th key={k} className="p-2 font-semibold whitespace-nowrap">
                           {k}
                         </th>
                       ))}
@@ -271,9 +374,9 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                   <tbody className="divide-y divide-slate-100">
                     {parsedRows.slice(0, 5).map((row, idx) => (
                       <tr key={idx} className="hover:bg-slate-50">
-                        {Object.keys(parsedRows[0] || {}).map((k) => (
-                          <td key={k} className="p-2 truncate max-w-xs">
-                            {String(row[k])}
+                        {previewKeys.map((k) => (
+                          <td key={k} className="p-2 truncate max-w-[180px] whitespace-nowrap">
+                            {String(row[k] ?? '')}
                           </td>
                         ))}
                       </tr>
@@ -299,7 +402,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
               disabled={loading || parsedRows.length === 0}
               className="px-5 py-2 text-xs font-bold bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white rounded-xl shadow-xs transition-colors"
             >
-              {loading ? 'Проверка и импорт...' : 'Импортировать в базу данных'}
+              {loading ? 'Проверка и импорт...' : `Импортировать (${parsedRows.length})`}
             </button>
           </div>
         </div>

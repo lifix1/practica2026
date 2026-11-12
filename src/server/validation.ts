@@ -28,11 +28,12 @@ export async function getAllAdditionalFieldsForType(
   // Walk up the hierarchy
   while (currentId !== null) {
     typeIdsToSearch.push(currentId);
-    const [foundType] = await db
+    const foundTypes: any[] = await db
       .select()
       .from(equipmentTypes)
       .where(eq(equipmentTypes.id, currentId))
       .limit(1);
+    const foundType = foundTypes[0];
 
     if (!foundType || !foundType.parent_id) {
       break;

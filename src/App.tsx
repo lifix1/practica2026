@@ -34,6 +34,7 @@ export default function App() {
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [selectedGroupCode, setSelectedGroupCode] = useState<string | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const fetchRooms = async () => {
     try {
@@ -184,8 +185,11 @@ export default function App() {
   // Delete equipment
   const handleDeleteEquipment = async (id: number) => {
     try {
-      await apiFetch(`/api/equipment/${id}`, { method: 'DELETE' });
-      setSelectedEquipmentId(null);
+      const res = await apiFetch(`/api/equipment/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        setSelectedEquipmentId(null);
+        setRefreshKey((k) => k + 1);
+      }
     } catch (e) {
       console.error(e);
     }
@@ -220,6 +224,7 @@ export default function App() {
             onOpenGroupDetail={(code) => setSelectedGroupCode(code)}
             rooms={rooms}
             types={types}
+            refreshKey={refreshKey}
           />
         )}
 
@@ -274,7 +279,7 @@ export default function App() {
           setShowFormModal(true);
         }}
         onDeleteEquipment={handleDeleteEquipment}
-        onReloadList={() => {}}
+        onReloadList={() => setRefreshKey((k) => k + 1)}
         onOpenLogin={() => setShowLoginModal(true)}
       />
 
@@ -285,7 +290,7 @@ export default function App() {
           setShowFormModal(false);
           setEditEquipmentData(null);
         }}
-        onSuccess={() => {}}
+        onSuccess={() => setRefreshKey((k) => k + 1)}
         initialData={editEquipmentData}
         rooms={rooms}
         types={types}
@@ -295,7 +300,11 @@ export default function App() {
       <ExcelImportModal
         isOpen={showExcelModal}
         onClose={() => setShowExcelModal(false)}
-        onSuccess={() => {}}
+        onSuccess={() => {
+          setRefreshKey((k) => k + 1);
+          fetchRooms();
+          fetchTypes();
+        }}
         types={types}
       />
 

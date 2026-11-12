@@ -75,6 +75,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
   // Writeoff modal & status state
   const [showWriteoffModal, setShowWriteoffModal] = useState(false);
   const [targetWriteoffState, setTargetWriteoffState] = useState<'PREPARING' | 'DOCUMENTS_PREPARATION' | 'WRITTEN_OFF'>('DOCUMENTS_PREPARATION');
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   const isUser = currentUser?.role === 'USER';
   const isEngineer = currentUser?.role === 'ENGINEER';
@@ -663,13 +664,18 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                   </h4>
                   <div className="grid grid-cols-2 gap-3 text-xs">
                     <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                      <span className="text-slate-500 block">Кабинет / Аудитория</span>
+                      <span className="text-slate-500 block">Помещение / Аудитория</span>
                       <span className="font-semibold text-slate-900 text-sm">
                         № {data.roomNumber} ({data.roomFloor} этаж)
                       </span>
+                      {data.additional_fields?.location_place && (
+                        <span className="text-[11px] text-slate-600 block mt-0.5">
+                          Место: {data.additional_fields.location_place}
+                        </span>
+                      )}
                     </div>
                     <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                      <span className="text-slate-500 block">Дата получения на баланс</span>
+                      <span className="text-slate-500 block">Дата принятия к учету</span>
                       <span className="font-semibold text-slate-900 text-sm">
                         {new Date(data.recived).toLocaleDateString('ru-RU')}
                       </span>
@@ -690,14 +696,107 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                 </div>
               </div>
 
+              {/* Department Accounting Classification Grid (Columns G-R) */}
+              <div className="border-t border-slate-100 pt-5 space-y-3">
+                <h4 className="text-xs font-bold uppercase text-slate-500 tracking-wider">
+                  Учетные характеристики кафедры
+                </h4>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+                  <div className="p-3 rounded-xl border border-slate-200 bg-white">
+                    <span className="text-slate-500 block mb-0.5">Статус</span>
+                    <span className="font-semibold text-slate-900">
+                      {data.additional_fields?.status || 'Действует'}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl border border-slate-200 bg-white">
+                    <span className="text-slate-500 block mb-0.5">Состояние</span>
+                    <span className="font-semibold text-slate-900">
+                      {data.additional_fields?.condition || 'Рабочее'}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl border border-slate-200 bg-white">
+                    <span className="text-slate-500 block mb-0.5">Категория (по бухучету)</span>
+                    <span className="font-semibold text-slate-900">
+                      {data.additional_fields?.accounting_category || 'Дорогостоящее'}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl border border-slate-200 bg-white">
+                    <span className="text-slate-500 block mb-0.5">Размеры (Д×Ш×В), см</span>
+                    <span className="font-semibold font-mono text-slate-900">
+                      {data.additional_fields?.dimensions || '—'}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl border border-slate-200 bg-white">
+                    <span className="text-slate-500 block mb-0.5">Цвет</span>
+                    <span className="font-semibold text-slate-900">
+                      {data.additional_fields?.color || '—'}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl border border-slate-200 bg-white">
+                    <span className="text-slate-500 block mb-0.5">Содержание драгметаллов</span>
+                    <span
+                      className={`font-semibold ${
+                        data.additional_fields?.precious_metals
+                          ? 'text-amber-700'
+                          : 'text-slate-700'
+                      }`}
+                    >
+                      {data.additional_fields?.precious_metals ? 'Да' : 'Нет'}
+                    </span>
+                  </div>
+                  <div className="p-3 rounded-xl border border-slate-200 bg-white sm:col-span-3 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <span className="text-slate-500 block mb-0.5">Оборудование на гарантии</span>
+                      <span
+                        className={`font-bold ${
+                          data.additional_fields?.is_under_warranty
+                            ? 'text-emerald-700'
+                            : 'text-slate-700'
+                        }`}
+                      >
+                        {data.additional_fields?.is_under_warranty ? 'Да' : 'Нет'}
+                      </span>
+                      {data.additional_fields?.warranty_until && (
+                        <span className="text-slate-500 ml-2">
+                          (Срок до:{' '}
+                          {new Date(data.additional_fields.warranty_until).toLocaleDateString('ru-RU')}
+                          {data.additional_fields?.warranty_expired && ' — срок истёк'})
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {(data.additional_fields?.description || data.additional_fields?.notes) && (
+                    <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 sm:col-span-3 space-y-1">
+                      {data.additional_fields?.description && (
+                        <div>
+                          <span className="text-slate-500 font-semibold">Описание: </span>
+                          <span className="text-slate-800">{data.additional_fields.description}</span>
+                        </div>
+                      )}
+                      {data.additional_fields?.notes && (
+                        <div>
+                          <span className="text-slate-500 font-semibold">Примечание: </span>
+                          <span className="text-slate-800">{data.additional_fields.notes}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+
               {/* Dynamic Additional Fields Section */}
-              {Array.isArray(data.fieldsDefinitions) && data.fieldsDefinitions.length > 0 && (
+              {Array.isArray(data.fieldsDefinitions) &&
+                data.fieldsDefinitions.filter(
+                  (f: AdditionalField) => f.code !== 'dimensions' && f.code !== 'color'
+                ).length > 0 && (
                 <div className="border-t border-slate-100 pt-5 space-y-3">
                   <h4 className="text-xs font-bold uppercase text-slate-500 tracking-wider">
                     Специфические характеристики типа «{data.typeName}»
                   </h4>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    {data.fieldsDefinitions.map((field: AdditionalField) => (
+                    {data.fieldsDefinitions
+                      .filter((f: AdditionalField) => f.code !== 'dimensions' && f.code !== 'color')
+                      .map((field: AdditionalField) => (
                       <div
                         key={field.code}
                         className="p-3 rounded-xl border border-slate-200 bg-white"
@@ -797,16 +896,12 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                       Редактировать
                     </button>
                     <button
-                      onClick={() => {
-                        if (confirm(`Удалить оборудование "${data.name}"?`)) {
-                          onDeleteEquipment(data.id);
-                          onClose();
-                        }
-                      }}
-                      className="p-2 border border-red-200 hover:bg-red-50 text-red-600 rounded-xl transition-colors"
-                      title="Удалить"
+                      onClick={() => setShowDeleteConfirm(true)}
+                      className="px-3 py-2 border border-red-200 hover:bg-red-50 text-red-600 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+                      title="Удалить оборудование"
                     >
                       <Trash2 className="w-4 h-4" />
+                      Удалить
                     </button>
                   </div>
                 )}
@@ -815,6 +910,43 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
           )}
         </div>
       </div>
+
+      {/* Sub-Modal: Delete Confirmation */}
+      {showDeleteConfirm && data && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-4">
+            <h3 className="font-bold text-base text-slate-900 flex items-center gap-2">
+              <Trash2 className="w-5 h-5 text-red-600" />
+              Удаление оборудования
+            </h3>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Вы действительно хотите удалить{' '}
+              <strong className="text-slate-900">«{data.name}»</strong> (инв. №{' '}
+              <span className="font-mono">{data.inventory_number}</span>)? Это действие необратимо.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowDeleteConfirm(false)}
+                className="px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowDeleteConfirm(false);
+                  onDeleteEquipment(data.id);
+                  onClose();
+                }}
+                className="px-4 py-2 text-xs font-bold bg-red-600 hover:bg-red-700 text-white rounded-xl shadow-xs"
+              >
+                Удалить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Sub-Modal: Report Issue */}
       {showIssueModal && (

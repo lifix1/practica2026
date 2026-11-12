@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --platform=node --format=esm --packages=external --bundle --outfile=dist/server.js",
@@ -12,6 +15,7 @@
     "db:push": "drizzle-kit push --config=src/db/drizzle.config.ts"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.5.16",
     "@google/genai": "^2.4.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/bcryptjs": "^2.4.6",
@@ -34,6 +38,7 @@
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "pg": "^8.23.1",
+    "pg-mem": "^3.0.14",
     "qrcode": "^1.5.4",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
