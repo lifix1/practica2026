@@ -100,11 +100,18 @@ export async function ensureTablesExist() {
         name TEXT NOT NULL,
         type_id BIGINT NOT NULL REFERENCES equipment_type(id),
         recived TIMESTAMP NOT NULL,
-        initial_cost BIGINT NOT NULL,
-        residual_cost BIGINT NOT NULL,
+        initial_cost DOUBLE PRECISION NOT NULL,
+        residual_cost DOUBLE PRECISION NOT NULL,
         room_id BIGINT NOT NULL REFERENCES room(id),
         additional_fields JSON NOT NULL DEFAULT '{}'
       );
+    `);
+
+    await db.execute(sql`
+      DO $$ BEGIN
+        ALTER TABLE equipment ALTER COLUMN initial_cost TYPE DOUBLE PRECISION;
+        ALTER TABLE equipment ALTER COLUMN residual_cost TYPE DOUBLE PRECISION;
+      EXCEPTION WHEN OTHERS THEN null; END $$;
     `);
 
     await db.execute(sql`

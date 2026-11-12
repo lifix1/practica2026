@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Plus, Trash2, AlertCircle, Save, ShieldCheck, ShieldAlert } from 'lucide-react';
 import type { Room, EquipmentType, AdditionalField } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
@@ -10,6 +10,18 @@ interface EquipmentFormModalProps {
   initialData?: any | null;
   rooms: Room[];
   types: EquipmentType[];
+}
+
+function toInputDate(value: any): string {
+  if (!value) return new Date().toISOString().split('T')[0];
+  const str = String(value).trim();
+  const isoPrefix = str.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoPrefix) return isoPrefix[1];
+  const parsed = new Date(str);
+  if (!isNaN(parsed.getTime())) {
+    return parsed.toISOString().split('T')[0];
+  }
+  return new Date().toISOString().split('T')[0];
 }
 
 export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
@@ -31,20 +43,27 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
   const [dynamicFieldDefs, setDynamicFieldDefs] = useState<AdditionalField[]>([]);
 
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [errors, setErrors] = useState<string[]>([]);
+  const formRef = useRef<HTMLFormElement>(null);
+  const previousDynamicCodesRef = useRef<string[]>([]);
+
+  const showErrors = (list: string[]) => {
+    setErrors(list);
+    requestAnimationFrame(() => {
+      formRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+    });
+  };
 
   // Initialize or reset form
   useEffect(() => {
+    if (!isOpen) return;
+    previousDynamicCodesRef.current = [];
     if (initialData) {
       setInventoryNumber(initialData.inventory_number || '');
       setName(initialData.name || '');
       setTypeId(initialData.type_id || '');
       setRoomId(initialData.room_id || '');
-      setRecived(
-        initialData.recived
-          ? new Date(initialData.recived).toISOString().split('T')[0]
-          : new Date().toISOString().split('T')[0]
-      );
+      setRecived(toInputDate(initialData.recived));
       setInitialCost(initialData.initial_cost ?? '');
       setResidualCost(initialData.residual_cost ?? '');
       setAdditionalFieldsValues({
@@ -73,22 +92,49 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
         is_under_warranty: false,
       });
     }
-    setError(null);
+    setErrors([]);
   }, [initialData, isOpen, types, rooms]);
 
-  // When typeId changes, fetch inherited dynamic fields
+  // When typeId changes, fetch inherited dynamic fields and strip stale type-specific keys
   useEffect(() => {
+    if (!isOpen) return;
     if (!typeId) {
       setDynamicFieldDefs([]);
       return;
     }
+    let cancelled = false;
     apiFetch(`/api/equipment-types/${typeId}/fields`)
       .then((r) => r.json())
       .then((fields: AdditionalField[]) => {
-        setDynamicFieldDefs(Array.isArray(fields) ? fields : []);
+        if (cancelled) return;
+        const safeFields = Array.isArray(fields) ? fields : [];
+        const newCodes = new Set(safeFields.map((f) => f.code));
+        const prevCodes = previousDynamicCodesRef.current;
+
+        // Remove fields that belonged strictly to the previously selected type
+        // (never remove universal department fields like dimensions/color)
+        const universalCodes = new Set(['dimensions', 'color']);
+        const staleCodes = prevCodes.filter(
+          (code) => !newCodes.has(code) && !universalCodes.has(code)
+        );
+        if (staleCodes.length > 0) {
+          setAdditionalFieldsValues((prev) => {
+            const next = { ...prev };
+            for (const code of staleCodes) {
+              delete next[code];
+            }
+            return next;
+          });
+        }
+
+        previousDynamicCodesRef.current = safeFields.map((f) => f.code);
+        setDynamicFieldDefs(safeFields);
       })
       .catch(console.error);
-  }, [typeId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [typeId, isOpen]);
 
   if (!isOpen) return null;
 
@@ -135,17 +181,76 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inventoryNumber || !name || !typeId || !roomId || !recived) {
-      setError('Заполните все обязательные основные поля');
+
+    const validationErrors: string[] = [];
+    if (!inventoryNumber.trim()) {
+      validationErrors.push('Укажите инвентарный номер оборудования.');
+    }
+    if (!name.trim()) {
+      validationErrors.push('Укажите наименование оборудования.');
+    }
+    if (!typeId) {
+      validationErrors.push('Выберите тип оборудования из списка.');
+    }
+    if (!roomId) {
+      validationErrors.push('Выберите помещение (аудиторию).');
+    }
+    if (!recived || isNaN(new Date(recived).getTime())) {
+      validationErrors.push('Укажите корректную дату принятия к учёту.');
+    }
+    if (initialCost !== '' && (isNaN(Number(initialCost)) || Number(initialCost) < 0)) {
+      validationErrors.push('Первоначальная стоимость не может быть отрицательной.');
+    }
+    if (residualCost !== '' && (isNaN(Number(residualCost)) || Number(residualCost) < 0)) {
+      validationErrors.push('Остаточная стоимость не может быть отрицательной.');
+    }
+
+    const qty = Number(additionalFieldsValues.quantity ?? 1);
+    if (!Number.isInteger(qty) || qty < 1) {
+      validationErrors.push('Поле «Количество (шт.)» должно быть целым числом не меньше 1.');
+    }
+
+    if (additionalFieldsValues.dimensions && String(additionalFieldsValues.dimensions).trim()) {
+      const dimParts = String(additionalFieldsValues.dimensions)
+        .trim()
+        .split(/[*xхXХ×/\s]+/)
+        .map((s) => parseFloat(s.replace(',', '.')))
+        .filter((n) => !isNaN(n) && n > 0);
+      if (dimParts.length === 0) {
+        validationErrors.push(
+          'В поле «Размеры (Д*Ш*В), см» укажите числовые габариты через «*» (например: 120*60*75).'
+        );
+      }
+    }
+
+    // Validate required type-specific fields client-side for immediate feedback
+    for (const field of dynamicFieldDefs) {
+      if (!field.is_required) continue;
+      const val = additionalFieldsValues[field.code];
+      const isEmpty =
+        val === undefined ||
+        val === null ||
+        val === '' ||
+        (Array.isArray(val) && val.length === 0);
+      if (isEmpty) {
+        validationErrors.push(`Заполните обязательное поле «${field.title}».`);
+      }
+    }
+
+    if (validationErrors.length > 0) {
+      showErrors(validationErrors);
       return;
     }
 
     setLoading(true);
-    setError(null);
+    setErrors([]);
 
     const payloadFields = {
       ...additionalFieldsValues,
-      is_under_warranty: warrantyUntilVal ? computedWarrantyActive : Boolean(additionalFieldsValues.is_under_warranty),
+      quantity: qty,
+      is_under_warranty: warrantyUntilVal
+        ? computedWarrantyActive
+        : Boolean(additionalFieldsValues.is_under_warranty),
     };
 
     const payload = {
@@ -154,8 +259,8 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
       type_id: Number(typeId),
       room_id: Number(roomId),
       recived: new Date(recived).toISOString(),
-      initial_cost: Number(initialCost) || 0,
-      residual_cost: Number(residualCost) || 0,
+      initial_cost: initialCost === '' ? 0 : Number(initialCost),
+      residual_cost: residualCost === '' ? 0 : Number(residualCost),
       additional_fields: payloadFields,
     };
 
@@ -171,18 +276,36 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
         body: JSON.stringify(payload),
       });
 
-      const resData = await res.json();
+      let resData: any = {};
+      try {
+        resData = await res.json();
+      } catch {
+        resData = {};
+      }
+
       if (!res.ok) {
-        if (resData.details && Array.isArray(resData.details)) {
-          throw new Error(resData.details.join('\n'));
+        if (res.status === 401) {
+          throw new Error('Сессия работы истекла. Пожалуйста, войдите в систему заново.');
         }
-        throw new Error(resData.error || 'Ошибка сохранения оборудования');
+        if (res.status === 403) {
+          throw new Error('Недостаточно прав: добавлять и редактировать оборудование может только Администратор.');
+        }
+        if (resData.details && Array.isArray(resData.details) && resData.details.length > 0) {
+          showErrors(resData.details);
+          return;
+        }
+        throw new Error(resData.error || 'Не удалось сохранить оборудование. Проверьте введённые данные.');
       }
 
       onSuccess();
       onClose();
     } catch (err: any) {
-      setError(err.message);
+      const msg = String(err?.message || '');
+      if (msg === 'Failed to fetch' || msg.includes('NetworkError')) {
+        showErrors(['Нет связи с сервером. Проверьте подключение к сети и повторите попытку.']);
+      } else {
+        showErrors([msg || 'Произошла непредвиденная ошибка при сохранении.']);
+      }
     } finally {
       setLoading(false);
     }
@@ -206,6 +329,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
             </p>
           </div>
           <button
+            type="button"
             onClick={onClose}
             className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
           >
@@ -214,11 +338,24 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
         </div>
 
         {/* Content */}
-        <form onSubmit={handleSubmit} className="p-6 overflow-y-auto space-y-5">
-          {error && (
-            <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-red-700 text-xs flex items-start gap-2 whitespace-pre-line">
-              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-              <span>{error}</span>
+        <form ref={formRef} onSubmit={handleSubmit} noValidate className="p-6 overflow-y-auto space-y-5">
+          {errors.length > 0 && (
+            <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl text-red-800 text-xs flex items-start gap-2.5">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+              <div className="space-y-1">
+                <div className="font-semibold text-red-900">
+                  Не удалось сохранить оборудование:
+                </div>
+                {errors.length === 1 ? (
+                  <p className="text-red-700">{errors[0]}</p>
+                ) : (
+                  <ul className="list-disc pl-4 space-y-0.5 text-red-700">
+                    {errors.map((errText, idx) => (
+                      <li key={idx}>{errText}</li>
+                    ))}
+                  </ul>
+                )}
+              </div>
             </div>
           )}
 
@@ -305,26 +442,28 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Первоначальная стоимость (₽)
+                Первоначальная стоимость (бел. руб., BYN)
               </label>
               <input
                 type="number"
+                step="0.01"
                 value={initialCost}
                 onChange={(e) => setInitialCost(e.target.value === '' ? '' : Number(e.target.value))}
-                placeholder="0"
+                placeholder="0.00"
                 className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
               />
             </div>
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Остаточная стоимость (₽)
+                Остаточная стоимость (бел. руб., BYN)
               </label>
               <input
                 type="number"
+                step="0.01"
                 value={residualCost}
                 onChange={(e) => setResidualCost(e.target.value === '' ? '' : Number(e.target.value))}
-                placeholder="0"
+                placeholder="0.00"
                 className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
               />
             </div>
@@ -516,6 +655,44 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
                   placeholder="Дополнительные заметки"
                   className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
                 />
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Количество (шт.)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={additionalFieldsValues.quantity ?? 1}
+                  onChange={(e) =>
+                    handleDynamicFieldChange(
+                      'quantity',
+                      e.target.value === '' ? 1 : Math.max(1, parseInt(e.target.value, 10) || 1)
+                    )
+                  }
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div className="p-3 rounded-xl border border-slate-200 bg-slate-50 flex items-center">
+                <label className="flex items-start gap-2.5 cursor-pointer text-xs">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(additionalFieldsValues.is_kit_part)}
+                    onChange={(e) => handleDynamicFieldChange('is_kit_part', e.target.checked)}
+                    className="mt-0.5 rounded text-blue-600"
+                  />
+                  <div>
+                    <span className="font-semibold text-slate-800 block">
+                      Часть комплекта («из комплекта»)
+                    </span>
+                    <span className="text-[11px] text-slate-500">
+                      Не указывать отдельную стоимость в накладной ОКУД 0501460.
+                    </span>
+                  </div>
+                </label>
               </div>
             </div>
           </div>

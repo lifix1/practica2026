@@ -33,6 +33,10 @@ import {
   generateQrDocx,
   generateGroupQrDocx,
   generateWriteoffDocx,
+  generateTransferInvoiceDocx,
+  generateLowValueWriteoffActDocx,
+  generateLowValueInvoiceDocx,
+  generateLowValueNoDmWriteoffActDocx,
 } from './src/server/docx-generator.ts';
 import {
   getAllAdditionalFieldsForType,
@@ -40,7 +44,7 @@ import {
   validateAdditionalFields,
 } from './src/server/validation.ts';
 import { seedDatabaseIfEmpty } from './src/db/seed.ts';
-import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, lte, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import path from 'path';
 
 dotenv.config();
@@ -1272,6 +1276,21 @@ app.get('/api/equipment/:id', async (req: AuthRequest, res, next) => {
   }
 });
 
+function formatEquipmentDbError(error: any): string {
+  const code = error?.code || error?.cause?.code;
+  const msg = String(error?.message || '');
+  if (code === '23505' || msg.includes('unique constraint') || msg.includes('UNIQUE constraint')) {
+    return 'Оборудование с таким инвентарным номером уже зарегистрировано в системе. Укажите другой инвентарный номер.';
+  }
+  if (code === '23503' || msg.includes('foreign key constraint')) {
+    return 'Указанный тип оборудования или помещение не найдены в справочнике. Обновите страницу и выберите значения из списка.';
+  }
+  if (code === '22P02' || code === '22003') {
+    return 'Проверьте правильность числовых полей и дат — одно из значений имеет неверный формат.';
+  }
+  return 'Не удалось сохранить данные оборудования. Проверьте заполненные поля и повторите попытку.';
+}
+
 // Create Equipment (Admin only)
 app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
@@ -1286,30 +1305,98 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       additional_fields,
     } = req.body;
 
-    if (!inventory_number || !name || !type_id || !room_id || !recived) {
-      return res.status(400).json({ error: 'Все обязательные поля оборудования должны быть заполнены' });
+    const formErrors: string[] = [];
+    const trimmedInv = String(inventory_number || '').trim();
+    const trimmedName = String(name || '').trim();
+    const numericTypeId = Number(type_id);
+    const numericRoomId = Number(room_id);
+    const recivedDate = recived ? new Date(recived) : null;
+
+    if (!trimmedInv) {
+      formErrors.push('Укажите инвентарный номер оборудования.');
+    }
+    if (!trimmedName) {
+      formErrors.push('Укажите наименование оборудования.');
+    }
+    if (!type_id || !Number.isInteger(numericTypeId) || numericTypeId <= 0) {
+      formErrors.push('Выберите тип оборудования из списка.');
+    }
+    if (!room_id || !Number.isInteger(numericRoomId) || numericRoomId <= 0) {
+      formErrors.push('Выберите помещение (аудиторию).');
+    }
+    if (!recivedDate || isNaN(recivedDate.getTime())) {
+      formErrors.push('Укажите корректную дату принятия к учёту.');
+    }
+
+    const parsedInitialCost =
+      initial_cost === '' || initial_cost === undefined || initial_cost === null
+        ? 0
+        : Number(String(initial_cost).replace(',', '.'));
+    const parsedResidualCost =
+      residual_cost === '' || residual_cost === undefined || residual_cost === null
+        ? 0
+        : Number(String(residual_cost).replace(',', '.'));
+
+    if (isNaN(parsedInitialCost) || parsedInitialCost < 0) {
+      formErrors.push('Первоначальная стоимость должна быть неотрицательным числом (например: 1210.23).');
+    }
+    if (isNaN(parsedResidualCost) || parsedResidualCost < 0) {
+      formErrors.push('Остаточная стоимость должна быть неотрицательным числом (например: 0.00).');
+    }
+
+    if (formErrors.length > 0) {
+      return res.status(400).json({
+        error: formErrors[0],
+        details: formErrors,
+      });
+    }
+
+    // Verify referenced type & room exist
+    const [foundType] = await db
+      .select()
+      .from(equipmentTypes)
+      .where(eq(equipmentTypes.id, numericTypeId))
+      .limit(1);
+    if (!foundType) {
+      return res.status(400).json({
+        error: 'Выбранный тип оборудования не найден. Обновите страницу и выберите тип заново.',
+      });
+    }
+
+    const [foundRoom] = await db
+      .select()
+      .from(rooms)
+      .where(eq(rooms.id, numericRoomId))
+      .limit(1);
+    if (!foundRoom) {
+      return res.status(400).json({
+        error: 'Выбранное помещение не найдено. Обновите страницу и выберите аудиторию заново.',
+      });
     }
 
     // Check unique inventory_number
     const existing = await db
       .select()
       .from(equipment)
-      .where(eq(equipment.inventory_number, inventory_number.trim()))
+      .where(eq(equipment.inventory_number, trimmedInv))
       .limit(1);
 
     if (existing.length > 0) {
-      return res.status(400).json({ error: `Оборудование с инвентарным номером "${inventory_number}" уже существует` });
+      return res.status(400).json({
+        error: `Оборудование с инвентарным номером «${trimmedInv}» уже существует в базе. Укажите другой номер или отредактируйте существующую карточку.`,
+      });
     }
 
     // Validate additional fields
     const validation = await validateAdditionalFields(
-      Number(type_id),
-      additional_fields || {}
+      numericTypeId,
+      additional_fields || {},
+      { typeName: foundType.name }
     );
 
     if (!validation.isValid) {
       return res.status(400).json({
-        error: 'Ошибки валидации дополнительных полей',
+        error: 'Проверьте правильность заполнения дополнительных полей',
         details: validation.errors,
       });
     }
@@ -1319,20 +1406,21 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
     const [created] = await db
       .insert(equipment)
       .values({
-        inventory_number: inventory_number.trim(),
-        name: name.trim(),
-        type_id: Number(type_id),
-        recived: new Date(recived),
-        initial_cost: Number(initial_cost) || 0,
-        residual_cost: Number(residual_cost) || 0,
-        room_id: Number(room_id),
+        inventory_number: trimmedInv,
+        name: trimmedName,
+        type_id: numericTypeId,
+        recived: recivedDate!,
+        initial_cost: Math.round(parsedInitialCost * 100) / 100,
+        residual_cost: Math.round(parsedResidualCost * 100) / 100,
+        room_id: numericRoomId,
         additional_fields: normalizedFields,
       })
       .returning();
 
     res.status(201).json(created);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error('Create equipment error:', error);
+    res.status(500).json({ error: formatEquipmentDbError(error) });
   }
 });
 
@@ -1340,6 +1428,22 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
 app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
     const eqId = Number(req.params.id);
+    if (!Number.isInteger(eqId) || eqId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор оборудования.' });
+    }
+
+    const [existingItem] = await db
+      .select()
+      .from(equipment)
+      .where(eq(equipment.id, eqId))
+      .limit(1);
+
+    if (!existingItem) {
+      return res.status(404).json({
+        error: 'Оборудование не найдено (возможно, оно уже было удалено).',
+      });
+    }
+
     const {
       inventory_number,
       name,
@@ -1351,28 +1455,120 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
       additional_fields,
     } = req.body;
 
+    const formErrors: string[] = [];
+    const effectiveTypeId = type_id !== undefined ? Number(type_id) : existingItem.type_id;
+
+    if (inventory_number !== undefined && !String(inventory_number).trim()) {
+      formErrors.push('Инвентарный номер не может быть пустым.');
+    }
+    if (name !== undefined && !String(name).trim()) {
+      formErrors.push('Наименование оборудования не может быть пустым.');
+    }
+    if (type_id !== undefined && (!Number.isInteger(effectiveTypeId) || effectiveTypeId <= 0)) {
+      formErrors.push('Выберите корректный тип оборудования.');
+    }
+    if (room_id !== undefined && (!Number.isInteger(Number(room_id)) || Number(room_id) <= 0)) {
+      formErrors.push('Выберите корректное помещение (аудиторию).');
+    }
+    if (recived !== undefined) {
+      const parsedDate = new Date(recived);
+      if (!recived || isNaN(parsedDate.getTime())) {
+        formErrors.push('Укажите корректную дату принятия к учёту.');
+      }
+    }
+    if (initial_cost !== undefined && initial_cost !== '') {
+      const c = Number(String(initial_cost).replace(',', '.'));
+      if (isNaN(c) || c < 0) {
+        formErrors.push('Первоначальная стоимость должна быть неотрицательным числом.');
+      }
+    }
+    if (residual_cost !== undefined && residual_cost !== '') {
+      const c = Number(String(residual_cost).replace(',', '.'));
+      if (isNaN(c) || c < 0) {
+        formErrors.push('Остаточная стоимость должна быть неотрицательным числом.');
+      }
+    }
+
+    if (formErrors.length > 0) {
+      return res.status(400).json({
+        error: formErrors[0],
+        details: formErrors,
+      });
+    }
+
+    if (inventory_number !== undefined) {
+      const trimmedInv = String(inventory_number).trim();
+      const duplicate = await db
+        .select({ id: equipment.id })
+        .from(equipment)
+        .where(and(eq(equipment.inventory_number, trimmedInv), ne(equipment.id, eqId)))
+        .limit(1);
+      if (duplicate.length > 0) {
+        return res.status(400).json({
+          error: `Инвентарный номер «${trimmedInv}» уже используется другим оборудованием. Укажите уникальный номер.`,
+        });
+      }
+    }
+
+    const [foundType] = await db
+      .select()
+      .from(equipmentTypes)
+      .where(eq(equipmentTypes.id, effectiveTypeId))
+      .limit(1);
+    if (!foundType) {
+      return res.status(400).json({
+        error: 'Выбранный тип оборудования не найден в справочнике.',
+      });
+    }
+
+    if (room_id !== undefined) {
+      const [foundRoom] = await db
+        .select()
+        .from(rooms)
+        .where(eq(rooms.id, Number(room_id)))
+        .limit(1);
+      if (!foundRoom) {
+        return res.status(400).json({
+          error: 'Выбранное помещение не найдено в справочнике.',
+        });
+      }
+    }
+
     // Validate additional fields if provided
-    if (additional_fields !== undefined && type_id) {
+    if (additional_fields !== undefined) {
+      const preservedKeys = Object.keys(
+        (existingItem.additional_fields as Record<string, any>) || {}
+      );
       const validation = await validateAdditionalFields(
-        Number(type_id),
-        additional_fields
+        effectiveTypeId,
+        additional_fields,
+        {
+          preservedKeys,
+          typeName: foundType.name,
+        }
       );
       if (!validation.isValid) {
         return res.status(400).json({
-          error: 'Ошибки валидации дополнительных полей',
+          error: 'Проверьте правильность заполнения дополнительных полей',
           details: validation.errors,
         });
       }
     }
 
     const updateData: any = {};
-    if (inventory_number) updateData.inventory_number = inventory_number.trim();
-    if (name) updateData.name = name.trim();
-    if (type_id) updateData.type_id = Number(type_id);
-    if (recived) updateData.recived = new Date(recived);
-    if (initial_cost !== undefined) updateData.initial_cost = Number(initial_cost);
-    if (residual_cost !== undefined) updateData.residual_cost = Number(residual_cost);
-    if (room_id) updateData.room_id = Number(room_id);
+    if (inventory_number !== undefined) updateData.inventory_number = String(inventory_number).trim();
+    if (name !== undefined) updateData.name = String(name).trim();
+    if (type_id !== undefined) updateData.type_id = effectiveTypeId;
+    if (recived !== undefined) updateData.recived = new Date(recived);
+    if (initial_cost !== undefined) {
+      const val = initial_cost === '' || initial_cost === null ? 0 : Number(String(initial_cost).replace(',', '.'));
+      updateData.initial_cost = Math.round(val * 100) / 100;
+    }
+    if (residual_cost !== undefined) {
+      const val = residual_cost === '' || residual_cost === null ? 0 : Number(String(residual_cost).replace(',', '.'));
+      updateData.residual_cost = Math.round(val * 100) / 100;
+    }
+    if (room_id !== undefined) updateData.room_id = Number(room_id);
     if (additional_fields !== undefined) {
       updateData.additional_fields = computeDynamicWarranty(additional_fields);
     }
@@ -1385,7 +1581,8 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
 
     res.json(updated);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error('Update equipment error:', error);
+    res.status(500).json({ error: formatEquipmentDbError(error) });
   }
 });
 
@@ -2045,8 +2242,11 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         warranty_until: formattedWarrantyUntil,
         notes: notes || null,
       };
-      if (quantityRaw && Number(quantityRaw) > 1) {
-        additional_fields.quantity = Number(quantityRaw);
+      if (quantityRaw) {
+        const parsedQty = parseInt(String(quantityRaw).replace(/\s+/g, ''), 10);
+        if (!isNaN(parsedQty) && parsedQty >= 1) {
+          additional_fields.quantity = parsedQty;
+        }
       }
 
       // Copy only genuinely extra custom columns (skip already-mapped accounting & department headers)
@@ -2084,8 +2284,8 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         name,
         type_id: matchedTypeId,
         recived: recivedDate,
-        initial_cost: Math.round(initialCost),
-        residual_cost: Math.round(residualCost),
+        initial_cost: Math.round(initialCost * 100) / 100,
+        residual_cost: Math.round(residualCost * 100) / 100,
         room_id: matchedRoomId,
         additional_fields,
       });
@@ -2163,54 +2363,31 @@ app.post('/api/writeoff/update-status', requireAuth, requireRole('ADMIN', 'ENGIN
   }
 });
 
-// Download Sample Writeoff Act DOCX (for example / demonstration)
+// Download Sample Writeoff Act DOCX (Case 1 example matching accounting template)
 app.get('/api/writeoff/sample-act', async (_req, res) => {
   try {
     const sampleItems = [
       {
         id: 991,
-        inventory_number: 'INV-2017-084',
-        name: 'Рабочая станция кафедры HP Z440 (Xeon E5 / 32GB / SSD 512GB)',
-        typeName: 'Компьютеры и рабочие станции',
+        inventory_number: '01383001',
+        name: 'Проектор Panasonic',
+        typeName: 'Периферия',
         roomNumber: '308',
-        initial_cost: '94500.00',
-        residual_cost: '0.00',
-        recivedDate: '15.09.2017',
-      },
-      {
-        id: 992,
-        inventory_number: 'INV-2016-042',
-        name: 'Монитор 24" Dell UltraSharp U2415 (IPS Full HD)',
-        typeName: 'Мониторы',
-        roomNumber: '308',
-        initial_cost: '21800.00',
-        residual_cost: '0.00',
-        recivedDate: '12.04.2016',
-      },
-      {
-        id: 993,
-        inventory_number: 'INV-2015-019',
-        name: 'Лазерное МФУ HP LaserJet Pro M426fdn (сетевой дуплекс)',
-        typeName: 'Оргтехника и МФУ',
-        roomNumber: '101',
-        initial_cost: '38900.00',
-        residual_cost: '0.00',
-        recivedDate: '20.11.2015',
-      },
-      {
-        id: 994,
-        inventory_number: 'INV-2014-008',
-        name: 'Сетевой управляемый коммутатор Cisco Catalyst 2960-X (24 порта PoE+)',
-        typeName: 'Сетевое оборудование',
-        roomNumber: '204',
-        initial_cost: '67400.00',
-        residual_cost: '0.00',
-        recivedDate: '10.03.2014',
+        initial_cost: 1210.23,
+        residual_cost: 0,
+        recivedDate: '10.01.2011',
+        recivedRaw: '2011-01-10',
+        additional_fields: {
+          accounting_category: 'Дорогостоящее',
+          precious_metals: true,
+        },
       },
     ];
 
-    const actNum = `СП-${new Date().getFullYear()}-007/ПРИМЕР`;
-    const buffer = await generateWriteoffDocx(sampleItems, actNum);
+    const buffer = await generateWriteoffDocx(sampleItems, '', {
+      writeoffDate: '2026-10-21',
+      reason: 'начисленная амортизация составляет 100%',
+    });
 
     res.setHeader(
       'Content-Type',
@@ -2218,7 +2395,7 @@ app.get('/api/writeoff/sample-act', async (_req, res) => {
     );
     res.setHeader(
       'Content-Disposition',
-      'attachment; filename="primer-akta-spisaniya-kafedry.docx"'
+      'attachment; filename="primer-akta-spisaniya-case1.docx"'
     );
     res.send(buffer);
   } catch (error: any) {
@@ -2227,8 +2404,268 @@ app.get('/api/writeoff/sample-act', async (_req, res) => {
   }
 });
 
-// Generate Writeoff Act DOCX
-// Spec (PDF page 10-11): "Когда Администратор точно будет знать, что данное оборудование будет списываться, он выставляет ему статус В процессе списания. Тогда появляется возможность сгенерировать для этого оборудования документы на списание"
+// Download Sample Transfer Invoice DOCX (ОКУД 0501460 — example with kit components)
+app.get('/api/writeoff/sample-invoice', async (_req, res) => {
+  try {
+    const sampleItems = [
+      {
+        id: 901,
+        inventory_number: '01361207',
+        name: 'Монитор SAMTRON',
+        typeName: 'Монитор',
+        roomNumber: '309',
+        initial_cost: 50.82,
+        residual_cost: 0,
+        recivedDate: '06.06.2002',
+        recivedRaw: '2002-06-06',
+        additional_fields: { quantity: 1 },
+      },
+      {
+        id: 902,
+        inventory_number: '01362923',
+        name: 'Системный блок',
+        typeName: 'Компьютер',
+        roomNumber: '309',
+        initial_cost: 877.27,
+        residual_cost: 0,
+        recivedDate: '10.01.2011',
+        recivedRaw: '2011-01-10',
+        additional_fields: { quantity: 1 },
+      },
+      {
+        id: 903,
+        inventory_number: '01363563',
+        name: 'Монитор из комплекта ПЭВМ Apple Mac mini (системный блок, монитор, клавиатура, мышь)',
+        typeName: 'Монитор',
+        roomNumber: '309',
+        initial_cost: 1200,
+        residual_cost: 0,
+        recivedDate: '10.09.2014',
+        recivedRaw: '2014-09-10',
+        additional_fields: { quantity: 1, is_kit_part: true },
+      },
+      {
+        id: 904,
+        inventory_number: '01363808',
+        name: 'Моноблок ITI/23,6-111 Touch мышь, кла-ра',
+        typeName: 'Компьютер',
+        roomNumber: '309',
+        initial_cost: 1390.91,
+        residual_cost: 0,
+        recivedDate: '10.06.2017',
+        recivedRaw: '2017-06-10',
+        additional_fields: { quantity: 1 },
+      },
+    ];
+
+    const buffer = await generateTransferInvoiceDocx(sampleItems, {
+      invoiceNumber: '',
+      invoiceDate: '2026-10-21',
+    });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="primer-nakladnoy-CIT-0501460.docx"'
+    );
+    res.send(buffer);
+  } catch (error: any) {
+    console.error('Error generating sample invoice:', error);
+    res.status(500).json({ error: 'Ошибка формирования примера накладной' });
+  }
+});
+
+// Download Sample Writeoff Act DOCX (Case 2: Малоценка с ДМ)
+app.get('/api/writeoff/sample-act-case2', async (_req, res) => {
+  try {
+    const sampleItems = [
+      {
+        id: 995,
+        inventory_number: '071001915',
+        name: 'Жесткий диск Segate',
+        typeName: 'Периферия',
+        roomNumber: '308',
+        initial_cost: 28.20,
+        residual_cost: 0,
+        recivedDate: '05.08.2010',
+        recivedRaw: '2010-08-05',
+        additional_fields: {
+          accounting_category: 'Малоценка',
+          precious_metals: true,
+          quantity: 1,
+        },
+      },
+    ];
+
+    const buffer = await generateLowValueWriteoffActDocx(sampleItems, {
+      writeoffDate: '2026-10-21',
+    });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="primer-akta-malotsenka-case2.docx"'
+    );
+    res.send(buffer);
+  } catch (error: any) {
+    console.error('Error generating Case 2 sample act:', error);
+    res.status(500).json({ error: 'Ошибка формирования примера акта (Кейс 2)' });
+  }
+});
+
+// Download Sample Form 434 Invoice DOCX (Case 2: Малоценка)
+app.get('/api/writeoff/sample-invoice-case2', async (_req, res) => {
+  try {
+    const sampleItems = [
+      {
+        id: 911,
+        inventory_number: '0710003219',
+        name: 'Источник бесперебойного питания',
+        typeName: 'Периферия',
+        roomNumber: '309',
+        initial_cost: 38.02,
+        residual_cost: 0,
+        recivedDate: '10.01.2012',
+        recivedRaw: '2012-01-10',
+        additional_fields: { accounting_category: 'Малоценка', quantity: 1 },
+      },
+      {
+        id: 912,
+        inventory_number: '0710010628',
+        name: 'Телефонный аппарат Протон',
+        typeName: 'Периферия',
+        roomNumber: '305',
+        initial_cost: 7.10,
+        residual_cost: 0,
+        recivedDate: '10.01.2011',
+        recivedRaw: '2011-01-10',
+        additional_fields: { accounting_category: 'Малоценка', quantity: 1 },
+      },
+      {
+        id: 913,
+        inventory_number: '071001915',
+        name: 'Жесткий диск Segate',
+        typeName: 'Периферия',
+        roomNumber: '308',
+        initial_cost: 28.20,
+        residual_cost: 0,
+        recivedDate: '05.08.2010',
+        recivedRaw: '2010-08-05',
+        additional_fields: { accounting_category: 'Малоценка', quantity: 1 },
+      },
+      {
+        id: 914,
+        inventory_number: '071002616',
+        name: 'DVD-плеер Sony',
+        typeName: 'Периферия',
+        roomNumber: '308',
+        initial_cost: 25.73,
+        residual_cost: 0,
+        recivedDate: '12.03.2013',
+        recivedRaw: '2013-03-12',
+        additional_fields: { accounting_category: 'Малоценка', quantity: 1 },
+      },
+    ];
+
+    const buffer = await generateLowValueInvoiceDocx(sampleItems, {
+      invoiceDate: '2026-10-21',
+    });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="primer-nakladnoy-forma-434-case2.docx"'
+    );
+    res.send(buffer);
+  } catch (error: any) {
+    console.error('Error generating Case 2 sample invoice:', error);
+    res.status(500).json({ error: 'Ошибка формирования примера накладной Форма 434' });
+  }
+});
+
+// Download Sample Writeoff Act DOCX (Case 3: Малоценка без ДМ)
+app.get('/api/writeoff/sample-act-case3', async (_req, res) => {
+  try {
+    const sampleItems = [
+      {
+        id: 921,
+        inventory_number: '07102050750',
+        name: 'Кресло Everprof 696 черная сетка б/у',
+        typeName: 'Стулья (газлифт)',
+        roomNumber: '305',
+        initial_cost: 57.09,
+        residual_cost: 0,
+        recivedDate: '31.05.2023',
+        recivedRaw: '2023-05-31',
+        additional_fields: {
+          accounting_category: 'Малоценка',
+          precious_metals: false,
+          quantity: 5,
+        },
+      },
+      {
+        id: 922,
+        inventory_number: '071000617',
+        name: 'Контейнер под процессор',
+        typeName: 'Корпусная мебель',
+        roomNumber: '309',
+        initial_cost: 55.40,
+        residual_cost: 0,
+        recivedDate: '22.01.2003',
+        recivedRaw: '2003-01-22',
+        additional_fields: {
+          accounting_category: 'Малоценка',
+          precious_metals: false,
+          quantity: 1,
+        },
+      },
+      {
+        id: 923,
+        inventory_number: '07100513',
+        name: 'Доска учебная',
+        typeName: 'Корпусная мебель',
+        roomNumber: '302',
+        initial_cost: 27.15,
+        residual_cost: 0,
+        recivedDate: '01.07.2016',
+        recivedRaw: '2016-07-01',
+        additional_fields: {
+          accounting_category: 'Малоценка',
+          precious_metals: false,
+          quantity: 2,
+        },
+      },
+    ];
+
+    const buffer = await generateLowValueNoDmWriteoffActDocx(sampleItems, '', {
+      writeoffDate: '2026-10-21',
+    });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="primer-akta-malotsenka-bez-dm-case3.docx"'
+    );
+    res.send(buffer);
+  } catch (error: any) {
+    console.error('Error generating Case 3 sample act:', error);
+    res.status(500).json({ error: 'Ошибка формирования примера акта (Кейс 3)' });
+  }
+});
+
+// Generate Writeoff Act DOCX (Supports Case 1: Дорогостоящее + Case 2: Малоценка с ДМ + Case 3: Малоценка без ДМ)
 async function handleGenerateActRequest(req: any, res: any) {
   try {
     let rawIds: any[] = [];
@@ -2260,28 +2697,84 @@ async function handleGenerateActRequest(req: any, res: any) {
         initial_cost: equipment.initial_cost,
         residual_cost: equipment.residual_cost,
         recived: equipment.recived,
+        additional_fields: equipment.additional_fields,
+        writeoffDate: equipmentWriteoffs.writeoff_date,
       })
       .from(equipment)
       .innerJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
       .innerJoin(rooms, eq(equipment.room_id, rooms.id))
+      .leftJoin(equipmentWriteoffs, eq(equipment.id, equipmentWriteoffs.equipment_id))
       .where(inArray(equipment.id, ids));
 
     if (items.length === 0) {
       return res.status(404).json({ error: 'Выбранное оборудование не найдено в базе данных' });
     }
 
-    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-    const currentYear = new Date().getFullYear();
-    const actNum = `СП-${currentYear}-${randomSuffix}`;
-    const formatted = items.map((i: any) => ({
+    // Preserve selection order
+    const itemById = new Map(items.map((it: any) => [it.id, it]));
+    const orderedItems = ids.map((id) => itemById.get(id)).filter(Boolean);
+
+    const writeoffDateParam = req.body?.writeoff_date || req.query?.writeoff_date || null;
+    const actNumberParam = req.body?.act_number ?? req.query?.act_number ?? '';
+    const reasonParam = req.body?.reason || req.query?.reason || 'начисленная амортизация составляет 100%';
+    const techConclusionParam = req.body?.technical_conclusion_number || req.query?.technical_conclusion_number || '';
+    const caseTypeParam = String(req.body?.case_type || req.query?.case_type || 'auto').toLowerCase();
+
+    const formatted = orderedItems.map((i: any) => ({
       ...i,
       recivedDate: i.recived ? new Date(i.recived).toLocaleDateString('ru-RU') : '—',
+      recivedRaw: i.recived,
     }));
 
-    const buffer = await generateWriteoffDocx(formatted, actNum);
+    const allLowValue = formatted.every((i: any) =>
+      String(i.additional_fields?.accounting_category || '')
+        .toLowerCase()
+        .includes('малоцен')
+    );
+    const anyPreciousMetals = formatted.some((i: any) =>
+      Boolean(i.additional_fields?.precious_metals)
+    );
 
-    // ASCII filename in Content-Disposition prevents Node.js HTTP header TypeError
-    const asciiFilename = `akt-spisaniya-SP-${currentYear}-${randomSuffix}.docx`;
+    const resolvedCase: 'case1' | 'case2' | 'case3' =
+      caseTypeParam === 'case3'
+        ? 'case3'
+        : caseTypeParam === 'case2'
+        ? 'case2'
+        : caseTypeParam === 'case1'
+        ? 'case1'
+        : allLowValue
+        ? anyPreciousMetals
+          ? 'case2'
+          : 'case3'
+        : 'case1';
+
+    const buffer =
+      resolvedCase === 'case3'
+        ? await generateLowValueNoDmWriteoffActDocx(formatted, String(actNumberParam || ''), {
+            writeoffDate: writeoffDateParam,
+            actDate: writeoffDateParam,
+          })
+        : resolvedCase === 'case2'
+        ? await generateLowValueWriteoffActDocx(formatted, {
+            writeoffDate: writeoffDateParam,
+            actDate: writeoffDateParam,
+            reason: req.body?.reason || req.query?.reason,
+            technicalConclusionNumber: String(techConclusionParam),
+          })
+        : await generateWriteoffDocx(formatted, String(actNumberParam || ''), {
+            writeoffDate: writeoffDateParam,
+            actDate: writeoffDateParam,
+            reason: String(reasonParam),
+            technicalConclusionNumber: String(techConclusionParam),
+          });
+
+    const dateTag = new Date().toISOString().slice(0, 10);
+    const asciiFilename =
+      resolvedCase === 'case3'
+        ? `akt-malotsenka-bez-dm-${items.length}-poz-${dateTag}.docx`
+        : resolvedCase === 'case2'
+        ? `akt-malotsenka-dm-${items.length}-ed-${dateTag}.docx`
+        : `akt-spisaniya-${items.length}-ed-${dateTag}.docx`;
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -2300,6 +2793,120 @@ async function handleGenerateActRequest(req: any, res: any) {
 app.post('/api/writeoff/generate-act', requireAuth, handleGenerateActRequest);
 app.get('/api/writeoff/generate-act', requireAuth, handleGenerateActRequest);
 app.get('/api/writeoff/act/:id', requireAuth, handleGenerateActRequest);
+
+// Generate Transfer Invoice DOCX (Supports Case 1: ОКУД 0501460 & Case 2: Форма 434; Case 3 has NO invoice)
+async function handleGenerateInvoiceRequest(req: any, res: any) {
+  try {
+    let rawIds: any[] = [];
+    if (Array.isArray(req.body?.equipment_ids)) {
+      rawIds = req.body.equipment_ids;
+    } else if (req.body?.equipment_id) {
+      rawIds = [req.body.equipment_id];
+    } else if (req.query?.equipment_ids) {
+      rawIds = String(req.query.equipment_ids).split(',');
+    }
+
+    const ids = rawIds.map(Number).filter((id) => !isNaN(id) && id > 0);
+    if (ids.length === 0) {
+      return res.status(400).json({ error: 'Выберите хотя бы одну единицу оборудования для формирования накладной' });
+    }
+
+    const caseTypeParam = String(req.body?.case_type || req.query?.case_type || 'auto').toLowerCase();
+    if (caseTypeParam === 'case3') {
+      return res.status(400).json({
+        error: 'Для Кейса 3 (малоценка без драгметаллов) накладная не оформляется — формируется только Акт списания.',
+      });
+    }
+
+    const items = await db
+      .select({
+        id: equipment.id,
+        inventory_number: equipment.inventory_number,
+        name: equipment.name,
+        typeName: equipmentTypes.name,
+        roomNumber: rooms.number,
+        initial_cost: equipment.initial_cost,
+        residual_cost: equipment.residual_cost,
+        recived: equipment.recived,
+        additional_fields: equipment.additional_fields,
+      })
+      .from(equipment)
+      .innerJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
+      .innerJoin(rooms, eq(equipment.room_id, rooms.id))
+      .where(inArray(equipment.id, ids));
+
+    if (items.length === 0) {
+      return res.status(404).json({ error: 'Выбранное оборудование не найдено в базе данных' });
+    }
+
+    // Preserve selection order if provided
+    const itemById = new Map(items.map((it: any) => [it.id, it]));
+    const orderedItems = ids.map((id) => itemById.get(id)).filter(Boolean);
+
+    const invoiceNumber = req.body?.invoice_number ?? req.query?.invoice_number ?? '';
+    const invoiceDate = req.body?.invoice_date || req.query?.invoice_date || new Date().toISOString().slice(0, 10);
+    const sender = req.body?.sender || 'Кафедра ПиСП';
+    const recipient = req.body?.recipient || 'ЦИТ';
+    const note = req.body?.note || '';
+
+    const formatted = orderedItems.map((i: any) => ({
+      ...i,
+      recivedDate: i.recived ? new Date(i.recived).toLocaleDateString('ru-RU') : '—',
+      recivedRaw: i.recived,
+    }));
+
+    const allLowValue = formatted.every((i: any) =>
+      String(i.additional_fields?.accounting_category || '')
+        .toLowerCase()
+        .includes('малоцен')
+    );
+    const anyPreciousMetals = formatted.some((i: any) =>
+      Boolean(i.additional_fields?.precious_metals)
+    );
+
+    if (caseTypeParam === 'auto' && allLowValue && !anyPreciousMetals) {
+      return res.status(400).json({
+        error: 'Для малоценного оборудования без драгметаллов (Кейс 3) накладная не требуется — достаточно только Акта списания.',
+      });
+    }
+
+    const isLowValue = caseTypeParam === 'case2' || (caseTypeParam === 'auto' && allLowValue);
+
+    const buffer = isLowValue
+      ? await generateLowValueInvoiceDocx(formatted, {
+          invoiceNumber: String(invoiceNumber),
+          invoiceDate,
+          department: String(sender),
+        })
+      : await generateTransferInvoiceDocx(formatted, {
+          invoiceNumber: String(invoiceNumber),
+          invoiceDate,
+          sender: String(sender),
+          recipient: String(recipient),
+          note: String(note),
+        });
+
+    const dateTag = new Date().toISOString().slice(0, 10);
+    const asciiFilename = isLowValue
+      ? `nakladnaya-forma-434-${dateTag}.docx`
+      : `nakladnaya-CIT-0501460-${dateTag}.docx`;
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${asciiFilename}"`
+    );
+    res.send(buffer);
+  } catch (error: any) {
+    console.error('Error generating transfer invoice:', error);
+    res.status(500).json({ error: error.message || 'Ошибка формирования накладной' });
+  }
+}
+
+app.post('/api/writeoff/generate-invoice', requireAuth, handleGenerateInvoiceRequest);
+app.get('/api/writeoff/generate-invoice', requireAuth, handleGenerateInvoiceRequest);
 
 // ==========================================
 // 7. ISSUE TRACKING & NOTIFICATIONS

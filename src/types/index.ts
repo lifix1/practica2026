@@ -74,6 +74,7 @@ export interface EquipmentAdditionalFields {
   warranty_until?: string | null; // Гарантия истекает (YYYY-MM-DD или DD.MM.YYYY)
   warranty_status_ru?: 'Да' | 'Нет'; // Автоматический расчет статуса гарантии
   warranty_expired?: boolean; // Истекла ли гарантия на текущий момент
+  is_kit_part?: boolean; // Часть комплекта (стоимость не указывается отдельно в накладной)
   notes?: string; // Примечание
   [key: string]: any;
 }

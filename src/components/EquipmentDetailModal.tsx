@@ -294,7 +294,10 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       const res = await apiFetch('/api/writeoff/generate-act', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ equipment_ids: [equipmentId] }),
+        body: JSON.stringify({
+          equipment_ids: [equipmentId],
+          writeoff_date: data?.writeoffDate || null,
+        }),
       });
       if (!res.ok) {
         const errJson = await res.json().catch(() => ({}));
@@ -683,13 +686,21 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                     <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
                       <span className="text-slate-500 block">Первоначальная стоимость</span>
                       <span className="font-semibold text-slate-900 text-sm">
-                        {Number(data.initial_cost).toLocaleString('ru-RU')} ₽
+                        {Number(data.initial_cost).toLocaleString('ru-RU', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}{' '}
+                        BYN
                       </span>
                     </div>
                     <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
                       <span className="text-slate-500 block">Остаточная стоимость</span>
                       <span className="font-semibold text-slate-900 text-sm">
-                        {Number(data.residual_cost).toLocaleString('ru-RU')} ₽
+                        {Number(data.residual_cost).toLocaleString('ru-RU', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}{' '}
+                        BYN
                       </span>
                     </div>
                   </div>
@@ -1216,7 +1227,12 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
             <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1">
               <div className="font-semibold text-slate-800">{data?.name}</div>
               <div className="text-slate-500 font-mono text-[11px]">
-                Инв. № {data?.inventory_number} • Каб. {data?.roomNumber} • {Number(data?.initial_cost).toLocaleString('ru-RU')} ₽
+                Инв. № {data?.inventory_number} • Каб. {data?.roomNumber} •{' '}
+                {Number(data?.initial_cost).toLocaleString('ru-RU', {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}{' '}
+                BYN
               </div>
             </div>
 

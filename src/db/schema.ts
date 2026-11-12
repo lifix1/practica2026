@@ -3,6 +3,7 @@ import {
   bigint,
   bigserial,
   boolean,
+  doublePrecision,
   integer,
   json,
   pgEnum,
@@ -89,8 +90,8 @@ export const equipment = pgTable('equipment', {
     .notNull()
     .references(() => equipmentTypes.id),
   recived: timestamp('recived').notNull(),
-  initial_cost: bigint('initial_cost', { mode: 'number' }).notNull(),
-  residual_cost: bigint('residual_cost', { mode: 'number' }).notNull(),
+  initial_cost: doublePrecision('initial_cost').notNull(),
+  residual_cost: doublePrecision('residual_cost').notNull(),
   room_id: bigint('room_id', { mode: 'number' })
     .notNull()
     .references(() => rooms.id),

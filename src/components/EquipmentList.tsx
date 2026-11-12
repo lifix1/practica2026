@@ -1066,7 +1066,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                 <th className="p-3">Габариты / Цвет</th>
                 <th className="p-3">Статус / Состояние</th>
                 <th className="p-3">Гарантия</th>
-                <th className="p-3">Ост. стоимость</th>
+                <th className="p-3">Ост. стоимость (BYN)</th>
                 <th className="p-3 text-right">Действия</th>
               </tr>
             </thead>
@@ -1247,7 +1247,11 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                         )}
                       </td>
                       <td className="p-3 text-slate-800 whitespace-nowrap font-medium">
-                        {Number(item.residual_cost).toLocaleString('ru-RU')} ₽
+                        {Number(item.residual_cost).toLocaleString('ru-RU', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}{' '}
+                        BYN
                       </td>
                       <td className="p-3 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1.5">
