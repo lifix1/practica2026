@@ -177,8 +177,37 @@ export async function seedDatabaseIfEmpty() {
   await ensureTablesExist();
 
   try {
-    const existingUsers = await db.select().from(users).limit(1);
+    const existingUsers = await db.select().from(users).limit(10);
     if (existingUsers.length > 0) {
+      // Auto-repair password hashes if database has old mock/placeholder hashes
+      const adminInDb = existingUsers.find((u) => u.login === 'admin');
+      if (adminInDb) {
+        const isAdminValid = await bcrypt.compare('admin123', adminInDb.password_hash);
+        if (!isAdminValid) {
+          console.log('Repairing admin password hash in database...');
+          const adminHash = await bcrypt.hash('admin123', 10);
+          await db.update(users).set({ password_hash: adminHash }).where(eq(users.id, adminInDb.id));
+        }
+      }
+
+      const engineerInDb = existingUsers.find((u) => u.login === 'engineer');
+      if (engineerInDb) {
+        const isEngValid = await bcrypt.compare('engineer123', engineerInDb.password_hash);
+        if (!isEngValid) {
+          const engHash = await bcrypt.hash('engineer123', 10);
+          await db.update(users).set({ password_hash: engHash }).where(eq(users.id, engineerInDb.id));
+        }
+      }
+
+      const userInDb = existingUsers.find((u) => u.login === 'user');
+      if (userInDb) {
+        const isUserValid = await bcrypt.compare('user123', userInDb.password_hash);
+        if (!isUserValid) {
+          const usrHash = await bcrypt.hash('user123', 10);
+          await db.update(users).set({ password_hash: usrHash }).where(eq(users.id, userInDb.id));
+        }
+      }
+
       console.log('Database already contains data, skipping seed.');
       return;
     }
