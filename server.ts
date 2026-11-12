@@ -52,18 +52,6 @@ app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 app.use(cookieParser());
 
-// Netlify Functions URL normalization (handles requests routed via /.netlify/functions/api)
-app.use((req, _res, next) => {
-  if (req.url.startsWith('/.netlify/functions/api/q/')) {
-    req.url = req.url.replace('/.netlify/functions/api/q/', '/q/');
-  } else if (req.url.startsWith('/.netlify/functions/api/')) {
-    req.url = req.url.replace('/.netlify/functions/api/', '/api/');
-  } else if (req.url === '/.netlify/functions/api') {
-    req.url = '/api';
-  }
-  next();
-});
-
 // Auto seed on startup (safe no-op if tables exist or already seeded)
 seedDatabaseIfEmpty().catch(console.error);
 
@@ -2228,7 +2216,4 @@ async function startServer() {
 
 export { app };
 
-// Only start standalone HTTP server when not running inside Netlify/AWS serverless function
-if (process.env.NETLIFY !== 'true' && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
-  startServer().catch(console.error);
-}
+startServer().catch(console.error);
