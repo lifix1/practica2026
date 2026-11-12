@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --platform=node --format=esm --packages=external --external:@vitejs/devtools/config --bundle --outfile=dist/server.mjs",
-    "clean": "rm -rf dist server.mjs",
+    "build": "vite build && esbuild server.ts --platform=node --format=esm --packages=external --external:@vitejs/devtools/config --bundle --outfile=netlify/functions/api.mjs",
+    "clean": "rm -rf dist netlify/functions/api.mjs",
     "lint": "tsc --noEmit",
     "db:push": "drizzle-kit push --config=src/db/drizzle.config.ts"
   },
