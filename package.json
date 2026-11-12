@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
-    "build": "vite build && esbuild server.ts --platform=node --format=esm --packages=external --external:@vitejs/devtools/config --bundle --outfile=dist/server.js",    "start": "node dist/server.js",
-    "clean": "rm -rf dist server.js",
+    "build": "vite build && esbuild server.ts --platform=node --format=cjs --packages=external --external:@vitejs/devtools/config --bundle --outfile=dist/server.js"б    "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "db:push": "drizzle-kit push --config=src/db/drizzle.config.ts"
   },
