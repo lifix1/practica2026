@@ -19,6 +19,8 @@ import {
   Sparkles,
   Palette,
   Trash2,
+  AlertCircle,
+  X,
 } from 'lucide-react';
 import type { Equipment, EquipmentType, Room, User, AdditionalField } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
@@ -133,6 +135,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
   >(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const isAdmin = currentUser?.role === 'ADMIN';
   const isEngineer = currentUser?.role === 'ENGINEER';
@@ -329,7 +332,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
-      alert(err.message);
+      setActionError(err.message);
     } finally {
       setGeneratingQrDocx(false);
     }
@@ -357,7 +360,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (err: any) {
-      alert(err.message);
+      setActionError(err.message);
     }
   };
 
@@ -380,7 +383,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
       setSelectedIds([]);
       fetchEquipment();
     } catch (err: any) {
-      alert(err.message);
+      setActionError(err.message);
     }
   };
 
@@ -444,7 +447,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
       setSelectedIds([]);
       fetchEquipment();
     } catch (err: any) {
-      alert(err.message);
+      setActionError(err.message);
     }
   };
 
@@ -958,6 +961,23 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
           </div>
         </div>
       </div>
+
+      {actionError && (
+        <div className="p-3.5 bg-red-50 border border-red-200 rounded-2xl text-red-700 text-xs flex items-center justify-between gap-2 animate-fadeIn">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>{actionError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActionError(null)}
+            className="p-1 rounded-lg hover:bg-red-100 text-red-500 transition-colors"
+            title="Скрыть сообщение"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Bulk actions banner if items selected */}
       {selectedIds.length > 0 && (

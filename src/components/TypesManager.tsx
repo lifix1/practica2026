@@ -5,13 +5,11 @@ import {
   Trash2,
   FolderTree,
   AlertCircle,
-  Tag,
   CheckCircle2,
   ListPlus,
   ChevronRight,
   Pencil,
   X,
-  HelpCircle,
 } from 'lucide-react';
 import type { EquipmentType, AdditionalField, User } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';

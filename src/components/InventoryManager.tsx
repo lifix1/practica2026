@@ -2,7 +2,6 @@ import React, { useState, useEffect } from 'react';
 import {
   ClipboardCheck,
   CheckCircle2,
-  Clock,
   QrCode,
   AlertCircle,
   Play,
@@ -99,7 +98,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
       );
       onRefreshGlobalAuditState();
     } catch (err: any) {
-      alert(err.message);
+      setError(err.message);
     }
   };
 

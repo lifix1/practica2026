@@ -2,13 +2,11 @@ import React, { useState, useEffect } from 'react';
 import {
   X,
   Boxes,
-  QrCode,
   Download,
   FileText,
   CheckCircle2,
   AlertCircle,
   ExternalLink,
-  Layers,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type { User } from '../types/index.ts';
@@ -102,14 +100,15 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
       // Get active audit first
       const auditRes = await apiFetch('/api/inventory/current');
       const auditData = await auditRes.json();
-      if (!auditData?.id) {
+      const activeAudit = auditData?.activeInventory;
+      if (!activeAudit?.id) {
         throw new Error('Сейчас нет активной инвентаризации для подтверждения');
       }
 
       // Verify each item in batch
       let verifiedCount = 0;
       for (const item of data.items) {
-        const vRes = await apiFetch(`/api/inventory/${auditData.id}/verify/${item.id}`, {
+        const vRes = await apiFetch(`/api/inventory/${activeAudit.id}/verify/${item.id}`, {
           method: 'POST',
         });
         if (vRes.ok) verifiedCount++;

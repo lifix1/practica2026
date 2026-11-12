@@ -40,11 +40,10 @@ import {
 } from './src/server/docx-generator.ts';
 import {
   getAllAdditionalFieldsForType,
-  parseExcelFile,
   validateAdditionalFields,
 } from './src/server/validation.ts';
 import { seedDatabaseIfEmpty } from './src/db/seed.ts';
-import { and, desc, eq, gte, ilike, inArray, isNotNull, isNull, lte, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, ilike, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import path from 'path';
 
 dotenv.config();
@@ -53,12 +52,31 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const isDev = process.env.NODE_ENV !== 'production';
 
+// Trust Render / reverse-proxy headers (X-Forwarded-Proto, X-Forwarded-Host) so req.protocol === 'https'
+app.set('trust proxy', 1);
+
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 app.use(cookieParser());
 
-// Auto seed on startup (safe no-op if tables exist or already seeded)
-seedDatabaseIfEmpty().catch(console.error);
+function getPublicBaseUrl(req: express.Request): string {
+  const host = req.get('host');
+  if (host) {
+    return `${req.protocol}://${host}`;
+  }
+  return (process.env.APP_URL || '').replace(/\/+$/, '');
+}
+
+// Health check endpoint for Render.com and Neon.tech connectivity monitoring
+app.get('/api/health', async (_req, res) => {
+  try {
+    await db.execute(sql`SELECT 1`);
+    res.json({ ok: true, database: 'connected' });
+  } catch (err: any) {
+    console.error('Health check DB error:', err?.message || err);
+    res.status(503).json({ ok: false, database: 'disconnected' });
+  }
+});
 
 // ==========================================
 // 1. AUTHENTICATION & USER MANAGEMENT ROUTES
@@ -1590,7 +1608,16 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
 app.delete('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
     const eqId = Number(req.params.id);
-    await db.delete(equipment).where(eq(equipment.id, eqId));
+    if (!Number.isInteger(eqId) || eqId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор оборудования' });
+    }
+    const deleted = await db
+      .delete(equipment)
+      .where(eq(equipment.id, eqId))
+      .returning({ id: equipment.id });
+    if (deleted.length === 0) {
+      return res.status(404).json({ error: 'Оборудование не найдено или уже удалено' });
+    }
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -1644,7 +1671,7 @@ app.post('/api/equipment/qr-docx', requireAuth, requireRole('ADMIN', 'ENGINEER')
       .innerJoin(rooms, eq(equipment.room_id, rooms.id))
       .where(inArray(equipment.id, equipment_ids.map(Number)));
 
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const baseUrl = getPublicBaseUrl(req);
     const formatted = items.map((i: any) => ({
       ...i,
       recivedDate: new Date(i.recived).toLocaleDateString('ru-RU'),
@@ -1709,7 +1736,7 @@ app.post('/api/equipment/qr-group', requireAuth, requireRole('ADMIN', 'ENGINEER'
       })
       .returning();
 
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const baseUrl = getPublicBaseUrl(req);
     const qrUrl = `${baseUrl}/q/${code}`;
 
     res.status(201).json({
@@ -1757,7 +1784,7 @@ app.get('/api/equipment/qr-group/:code', optionalAuth, async (req: AuthRequest, 
           .where(inArray(equipment.id, ids))
       : [];
 
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const baseUrl = getPublicBaseUrl(req);
     res.json({
       batch,
       qrUrl: `${baseUrl}/q/${batch.code}`,
@@ -1806,7 +1833,7 @@ app.get('/api/equipment/qr-group/:code/docx', requireAuth, requireRole('ADMIN', 
       recivedDate: i.recived ? new Date(i.recived).toLocaleDateString('ru-RU') : '—',
     }));
 
-    const baseUrl = `${req.protocol}://${req.get('host')}`;
+    const baseUrl = getPublicBaseUrl(req);
     const docxBuffer = await generateGroupQrDocx(
       {
         code: batch.code,
@@ -2336,15 +2363,24 @@ app.post('/api/writeoff/update-status', requireAuth, requireRole('ADMIN', 'ENGIN
       return res.status(400).json({ error: 'Недопустимый статус списания' });
     }
 
-    const date = state === 'WRITTEN_OFF'
-      ? (writeoff_date ? new Date(writeoff_date) : new Date())
-      : null;
+    const validIds = equipment_ids
+      .map((id: any) => Number(id))
+      .filter((id: number) => Number.isInteger(id) && id > 0);
+    if (validIds.length === 0) {
+      return res.status(400).json({ error: 'Некорректные идентификаторы оборудования' });
+    }
 
-    for (const eqId of equipment_ids) {
+    const parsedDate = writeoff_date ? new Date(writeoff_date) : new Date();
+    if (state === 'WRITTEN_OFF' && isNaN(parsedDate.getTime())) {
+      return res.status(400).json({ error: 'Некорректная дата списания' });
+    }
+    const date = state === 'WRITTEN_OFF' ? parsedDate : null;
+
+    for (const eqId of validIds) {
       await db
         .insert(equipmentWriteoffs)
         .values({
-          equipment_id: Number(eqId),
+          equipment_id: eqId,
           state,
           writeoff_date: date,
         })
@@ -2357,7 +2393,7 @@ app.post('/api/writeoff/update-status', requireAuth, requireRole('ADMIN', 'ENGIN
         });
     }
 
-    res.json({ success: true, count: equipment_ids.length });
+    res.json({ success: true, count: validIds.length });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -2920,10 +2956,30 @@ app.get('/api/writeoff/generate-invoice', requireAuth, handleGenerateInvoiceRequ
 app.post('/api/equipment/:id/issues', requireAuth, async (req: AuthRequest, res) => {
   try {
     const eqId = Number(req.params.id);
+    if (!Number.isInteger(eqId) || eqId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор оборудования' });
+    }
     const { state, description, broken_at } = req.body;
 
-    if (!state || !description || !description.trim()) {
+    if (!state || !description || !String(description).trim()) {
       return res.status(400).json({ error: 'Характер неисправности и описание обязательны' });
+    }
+    if (!['ISSUE', 'CRITICAL_ISSUE', 'WEAR_AND_TEAR'].includes(state)) {
+      return res.status(400).json({ error: 'Недопустимый тип неисправности' });
+    }
+
+    const brokenDate = broken_at ? new Date(broken_at) : new Date();
+    if (isNaN(brokenDate.getTime())) {
+      return res.status(400).json({ error: 'Некорректная дата обнаружения неисправности' });
+    }
+
+    const [eqExists] = await db
+      .select({ id: equipment.id })
+      .from(equipment)
+      .where(eq(equipment.id, eqId))
+      .limit(1);
+    if (!eqExists) {
+      return res.status(404).json({ error: 'Оборудование не найдено' });
     }
 
     // Check if equipment is written off
@@ -2947,8 +3003,8 @@ app.post('/api/equipment/:id/issues', requireAuth, async (req: AuthRequest, res)
       .values({
         equipment_id: eqId,
         state: state as any,
-        description: description.trim(),
-        broken_at: broken_at ? new Date(broken_at) : new Date(),
+        description: String(description).trim(),
+        broken_at: brokenDate,
         repaired_at: null,
       })
       .returning();
@@ -3104,7 +3160,12 @@ app.get('/api/notifications', requireAuth, async (req: AuthRequest, res) => {
 app.delete('/api/notifications/:id', requireAuth, async (req: AuthRequest, res) => {
   try {
     const notifId = Number(req.params.id);
-    await db.delete(notifications).where(eq(notifications.id, notifId));
+    if (!Number.isInteger(notifId) || notifId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор уведомления' });
+    }
+    await db
+      .delete(notifications)
+      .where(and(eq(notifications.id, notifId), eq(notifications.user_id, req.user!.id)));
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -3128,6 +3189,12 @@ app.post('/api/equipment/transfers', requireAuth, requireRole('ADMIN', 'ENGINEER
 
     const transferDate = issued_at ? new Date(issued_at) : new Date();
     const expectedReturnDate = expected_return_at ? new Date(expected_return_at) : null;
+    if (isNaN(transferDate.getTime())) {
+      return res.status(400).json({ error: 'Некорректная дата передачи оборудования' });
+    }
+    if (expectedReturnDate && isNaN(expectedReturnDate.getTime())) {
+      return res.status(400).json({ error: 'Некорректная планируемая дата возврата' });
+    }
     const errors: string[] = [];
 
     for (const eqId of equipment_ids) {
@@ -3449,6 +3516,9 @@ app.post('/api/inventory/:id/finish', requireAuth, requireRole('ADMIN', 'ENGINEE
 // ==========================================
 
 async function startServer() {
+  // Ensure schema tables exist and initial seed runs BEFORE serving HTTP requests (critical for Neon cold start)
+  await seedDatabaseIfEmpty();
+
   if (isDev) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({

@@ -1,15 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import {
   Clock,
-  ArrowRightLeft,
   Search,
-  CheckCircle2,
-  Calendar,
-  User,
-  AlertCircle,
-  Building,
 } from 'lucide-react';
 import type { User as UserType } from '../types/index.ts';
+import { apiFetch } from '../utils/api.ts';
 
 interface TransfersManagerProps {
   currentUser: UserType | null;
@@ -17,7 +12,6 @@ interface TransfersManagerProps {
 }
 
 export const TransfersManager: React.FC<TransfersManagerProps> = ({
-  currentUser,
   onOpenEquipmentDetail,
 }) => {
   const [transfers, setTransfers] = useState<any[]>([]);
@@ -34,7 +28,7 @@ export const TransfersManager: React.FC<TransfersManagerProps> = ({
       if (searchBorrower.trim()) params.set('transferred_to', searchBorrower.trim());
       params.set('limit', '50');
 
-      const res = await fetch(`/api/equipment?${params.toString()}`);
+      const res = await apiFetch(`/api/equipment?${params.toString()}`);
       const data = await res.json();
       setTransfers(Array.isArray(data?.items) ? data.items : []);
     } catch (err) {

@@ -1,9 +1,8 @@
-import bcrypt from 'bcryptjs';
 import type { NextFunction, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { db } from '../db/index.ts';
-import { refreshTokens, users } from '../db/schema.ts';
-import { and, eq, lt } from 'drizzle-orm';
+import { refreshTokens } from '../db/schema.ts';
+import { lt } from 'drizzle-orm';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'university-inventory-system-secret-key-2026';
 const ACCESS_TOKEN_EXPIRY = 120 * 60; // 120 minutes in seconds (as specified in PDF)

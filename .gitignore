@@ -6,6 +6,7 @@ coverage/
 *.log
 .env*
 !.env.example
+.aistudio/
 
 # Guides & setup documentation
 *guide*.md

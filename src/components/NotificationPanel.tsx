@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Bell, AlertTriangle, Check, QrCode } from 'lucide-react';
+import { X, Bell, Check } from 'lucide-react';
 import type { NotificationItem } from '../types/index.ts';
 
 interface NotificationPanelProps {

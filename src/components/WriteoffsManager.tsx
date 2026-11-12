@@ -207,7 +207,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
         'invoice-case2': 'primer-nakladnoy-forma-434-case2.docx',
         'act-case3': 'primer-akta-malotsenka-bez-dm-case3.docx',
       };
-      const res = await fetch(endpointMap[kind]);
+      const res = await apiFetch(endpointMap[kind]);
       if (!res.ok) throw new Error('Ошибка скачивания примера документа');
       const blob = await res.blob();
       triggerBlobDownload(blob, filenameMap[kind]);

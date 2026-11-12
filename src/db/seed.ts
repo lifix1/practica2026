@@ -8,13 +8,11 @@ import {
   equipmentTypes,
   equipmentWriteoffs,
   equipmentBatches,
-  inventories,
   notifications,
   rooms,
   users,
-  verifications,
 } from './schema.ts';
-import { eq, sql } from 'drizzle-orm';
+import { sql } from 'drizzle-orm';
 
 export async function ensureTablesExist() {
   try {
@@ -237,8 +235,8 @@ export async function seedDatabaseIfEmpty() {
     const [room308] = await db.insert(rooms).values({ number: '308', floor: 3 }).returning();
     const [room309] = await db.insert(rooms).values({ number: '309', floor: 3 }).returning();
     const [room101] = await db.insert(rooms).values({ number: '101', floor: 1 }).returning();
-    const [room204] = await db.insert(rooms).values({ number: '204', floor: 2 }).returning();
-    const [room412] = await db.insert(rooms).values({ number: '412', floor: 4 }).returning();
+    await db.insert(rooms).values({ number: '204', floor: 2 });
+    await db.insert(rooms).values({ number: '412', floor: 4 });
 
     // 3. Create the 11 Standard Equipment Types specified by the user:
     const standardTypeNames = [
@@ -327,7 +325,7 @@ export async function seedDatabaseIfEmpty() {
     // 5. Seed Equipment Items matching user screenshot and requirements
     // Row 1 from screenshot:
     // 305, Стол секретаря, [нет размеров], Описание: Лазерный принтер HP LJ 1020 белый, Периферия, Действует, Рабочее, Дорогостоящее, Драгметаллы: Да, Гарантия: Нет
-    const [eq1] = await db
+    await db
       .insert(equipment)
       .values({
         inventory_number: 'INV-2019-011',
@@ -349,8 +347,7 @@ export async function seedDatabaseIfEmpty() {
           warranty_until: null,
           notes: 'Установлен у секретаря кафедры',
         },
-      })
-      .returning();
+      });
 
     // Row 2 from screenshot:
     // 302, Центральный стол на 12 мест, Размеры: 560*200*140, Цвет: серый, Корпусная мебель, Действует, Рабочее, Дорогостоящее, Драгметаллы: Нет, Гарантия: Нет
@@ -416,7 +413,7 @@ export async function seedDatabaseIfEmpty() {
 
     // Row 4 from screenshot:
     // 309, Стол 7, Компьютер, Действует, Рабочее, Дорогостоящее, Драгметаллы: Да, Гарантия: Да, Гарантия истекает: 12.05.2027
-    const [eq4] = await db
+    await db
       .insert(equipment)
       .values({
         inventory_number: 'INV-2024-007',
@@ -440,12 +437,11 @@ export async function seedDatabaseIfEmpty() {
           ram_gb: 16,
           notes: 'На гарантии до 12.05.2027',
         },
-      })
-      .returning();
+      });
 
     // Row 5 from screenshot:
     // 309, Стол 7, Периферия / Монитор, Действует, Рабочее, Дорогостоящее, Драгметаллы: Да, Гарантия: Нет
-    const [eq5] = await db
+    await db
       .insert(equipment)
       .values({
         inventory_number: 'INV-2020-071',
@@ -466,12 +462,11 @@ export async function seedDatabaseIfEmpty() {
           is_under_warranty: false,
           warranty_until: null,
         },
-      })
-      .returning();
+      });
 
     // Row 6 from screenshot:
     // 305, Стол 10, Описание: Кресло офисное подъёмно-поворотное, Цвет: черный, Стул (газлифт), Действует, Рабочее, Малоценка, Драгметаллы: Нет, Гарантия: Нет
-    const [eq6] = await db
+    await db
       .insert(equipment)
       .values({
         inventory_number: 'INV-2022-194',
@@ -492,8 +487,7 @@ export async function seedDatabaseIfEmpty() {
           is_under_warranty: false,
           warranty_until: null,
         },
-      })
-      .returning();
+      });
 
     // Additional sample rows showcasing all states & types:
     // Sample with expired warranty (yesterday) to demonstrate automatic expiry:
@@ -524,7 +518,7 @@ export async function seedDatabaseIfEmpty() {
       .returning();
 
     // Sample furniture with other dimensions (тумба мобильная):
-    const [eq8] = await db
+    await db
       .insert(equipment)
       .values({
         inventory_number: 'INV-2022-054',
@@ -548,11 +542,10 @@ export async function seedDatabaseIfEmpty() {
           precious_metals: false,
           is_under_warranty: false,
         },
-      })
-      .returning();
+      });
 
     // Sample chair ISO:
-    const [eq9] = await db
+    await db
       .insert(equipment)
       .values({
         inventory_number: 'INV-2023-201',
@@ -572,11 +565,10 @@ export async function seedDatabaseIfEmpty() {
           precious_metals: false,
           is_under_warranty: false,
         },
-      })
-      .returning();
+      });
 
     // Sample blinds:
-    const [eq10] = await db
+    await db
       .insert(equipment)
       .values({
         inventory_number: 'INV-2021-310',
@@ -596,8 +588,7 @@ export async function seedDatabaseIfEmpty() {
           precious_metals: false,
           is_under_warranty: false,
         },
-      })
-      .returning();
+      });
 
     // Sample in storage (на хранении):
     const [eq11] = await db
@@ -625,7 +616,7 @@ export async function seedDatabaseIfEmpty() {
       .returning();
 
     // Sample software:
-    const [eq12] = await db
+    await db
       .insert(equipment)
       .values({
         inventory_number: 'INV-2024-501',
@@ -645,8 +636,7 @@ export async function seedDatabaseIfEmpty() {
           is_under_warranty: true,
           warranty_until: '2028-02-01',
         },
-      })
-      .returning();
+      });
 
     // 6. Writeoffs seed
     await db.insert(equipmentWriteoffs).values({

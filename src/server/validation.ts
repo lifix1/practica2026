@@ -4,7 +4,6 @@ import {
   equipmentTypes,
 } from '../db/schema.ts';
 import { and, eq, inArray } from 'drizzle-orm';
-import * as XLSX from 'xlsx';
 
 export interface FieldDefinition {
   id: number;
@@ -316,11 +315,4 @@ function validateSingleValue(val: any, field: FieldDefinition): string | null {
     default:
       return null;
   }
-}
-
-export function parseExcelFile(buffer: Buffer): any[] {
-  const workbook = XLSX.read(buffer, { type: 'buffer' });
-  const firstSheetName = workbook.SheetNames[0];
-  const worksheet = workbook.Sheets[firstSheetName];
-  return XLSX.utils.sheet_to_json(worksheet, { defval: '' });
 }

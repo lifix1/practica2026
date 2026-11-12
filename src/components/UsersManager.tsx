@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Users, Plus, Shield, UserPlus, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Users, UserPlus, AlertCircle, CheckCircle2 } from 'lucide-react';
 import type { User, UserRole } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
 

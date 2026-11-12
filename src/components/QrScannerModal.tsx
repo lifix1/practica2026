@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { X, Camera, Upload, Search, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
 import jsQR from 'jsqr';
 import type { Equipment } from '../types/index.ts';
+import { apiFetch } from '../utils/api.ts';
 
 interface QrScannerModalProps {
   isOpen: boolean;
@@ -31,7 +32,7 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
   // Load equipment list on open for ID and inventory matching
   useEffect(() => {
     if (isOpen) {
-      fetch('/api/equipment?limit=200')
+      apiFetch('/api/equipment?limit=200')
         .then((r) => r.json())
         .then((data) => {
           if (Array.isArray(data?.items)) setEquipmentList(data.items);

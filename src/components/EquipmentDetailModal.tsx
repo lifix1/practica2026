@@ -1,21 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import {
   X,
-  QrCode,
   AlertTriangle,
-  Wrench,
   Clock,
   History,
   CheckCircle,
   Edit,
   Trash2,
-  Share2,
-  Calendar,
-  Building,
-  Tag,
-  DollarSign,
   FileText,
-  AlertOctagon,
   ArrowRightLeft,
   Lock,
   RefreshCw,
@@ -23,7 +15,6 @@ import {
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type {
-  Equipment,
   EquipmentIssue,
   EquipmentTransfer,
   User,
@@ -76,8 +67,11 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
   const [showWriteoffModal, setShowWriteoffModal] = useState(false);
   const [targetWriteoffState, setTargetWriteoffState] = useState<'PREPARING' | 'DOCUMENTS_PREPARATION' | 'WRITTEN_OFF'>('DOCUMENTS_PREPARATION');
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [actionFeedback, setActionFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
-  const isUser = currentUser?.role === 'USER';
   const isEngineer = currentUser?.role === 'ENGINEER';
   const isAdmin = currentUser?.role === 'ADMIN';
 
@@ -157,7 +151,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       }));
       onReloadList();
     } catch (err: any) {
-      alert(err.message);
+      setActionFeedback({ type: 'error', text: err.message });
     }
   };
 
@@ -180,7 +174,10 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       const resData = await res.json();
       if (!res.ok) throw new Error(resData.error || 'Не удалось зафиксировать поломку');
 
-      alert('Информация о неисправности успешно зарегистрирована и отправлена инженерам!');
+      setActionFeedback({
+        type: 'success',
+        text: 'Информация о неисправности успешно зарегистрирована и отправлена инженерам!',
+      });
       setShowIssueModal(false);
       setIssueDesc('');
       // Reload details
@@ -189,7 +186,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       setData(updated);
       onReloadList();
     } catch (err: any) {
-      alert(err.message);
+      setActionFeedback({ type: 'error', text: err.message });
     }
   };
 
@@ -208,7 +205,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       setData(updated);
       onReloadList();
     } catch (err: any) {
-      alert(err.message);
+      setActionFeedback({ type: 'error', text: err.message });
     }
   };
 
@@ -220,7 +217,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       setIssuesHistory(Array.isArray(list) ? list : []);
       setShowIssueHistory(true);
     } catch (err: any) {
-      alert(err.message);
+      setActionFeedback({ type: 'error', text: err.message });
     }
   };
 
@@ -232,7 +229,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       setTransferHistory(Array.isArray(list) ? list : []);
       setShowTransferHistory(true);
     } catch (err: any) {
-      alert(err.message);
+      setActionFeedback({ type: 'error', text: err.message });
     }
   };
 
@@ -251,7 +248,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       setData(updated);
       onReloadList();
     } catch (err: any) {
-      alert(err.message);
+      setActionFeedback({ type: 'error', text: err.message });
     }
   };
 
@@ -283,7 +280,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       setData(updated);
       onReloadList();
     } catch (err: any) {
-      alert(err.message);
+      setActionFeedback({ type: 'error', text: err.message });
     }
   };
 
@@ -339,7 +336,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       fetchDetail();
       onReloadList();
     } catch (e: any) {
-      alert(e.message);
+      setActionFeedback({ type: 'error', text: e.message });
     }
   };
 
@@ -464,6 +461,25 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
 
           {data && !loading && (
             <>
+              {actionFeedback && (
+                <div
+                  className={`p-3.5 rounded-xl border text-xs flex items-center justify-between gap-2 animate-fadeIn ${
+                    actionFeedback.type === 'success'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800 font-semibold'
+                      : 'bg-red-50 border-red-200 text-red-700'
+                  }`}
+                >
+                  <span>{actionFeedback.text}</span>
+                  <button
+                    type="button"
+                    onClick={() => setActionFeedback(null)}
+                    className="p-1 rounded-lg hover:bg-black/5 shrink-0"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
               {/* Audit Verification Banner (if current active audit) */}
               {data.currentAuditVerification && (
                 <div

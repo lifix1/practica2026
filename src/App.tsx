@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { Header } from './components/Header.tsx';
 import { EquipmentList } from './components/EquipmentList.tsx';
 import { EquipmentDetailModal } from './components/EquipmentDetailModal.tsx';

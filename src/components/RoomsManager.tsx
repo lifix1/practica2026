@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { DoorOpen, Plus, Building, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { DoorOpen, Plus, AlertCircle, CheckCircle2 } from 'lucide-react';
 import type { Room, User } from '../types/index.ts';
+import { apiFetch } from '../utils/api.ts';
 
 interface RoomsManagerProps {
   currentUser: User | null;
@@ -26,7 +27,7 @@ export const RoomsManager: React.FC<RoomsManagerProps> = ({
     if (!number.trim() || floor === '') return;
 
     try {
-      const res = await fetch('/api/rooms', {
+      const res = await apiFetch('/api/rooms', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
