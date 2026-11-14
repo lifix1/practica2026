@@ -16,9 +16,11 @@ import {
   WidthType,
 } from 'docx';
 import QRCode from 'qrcode';
+import { encodeEquipmentQrToken, encodeGroupQrToken } from './qr-token.ts';
 
 export interface EquipmentForDocx {
   id: number;
+  qrCode?: string;
   inventory_number: string;
   name: string;
   typeName: string;
@@ -335,16 +337,12 @@ export async function generateQrDocx(
 
   const cellMargin =
     columns === 4 ? 90 : columns === 3 ? 120 : columns === 2 ? 160 : 200;
-  const headerFontSize =
-    columns === 4 ? 12 : columns === 3 ? 14 : columns === 2 ? 16 : 18;
   const nameFontSize =
     columns === 4 ? 15 : columns === 3 ? 18 : columns === 2 ? 22 : 24;
   const invFontSize =
     columns === 4 ? 15 : columns === 3 ? 17 : columns === 2 ? 20 : 22;
   const metaFontSize =
     columns === 4 ? 12 : columns === 3 ? 14 : columns === 2 ? 16 : 18;
-  const gatewayFontSize =
-    columns === 4 ? 11 : columns === 3 ? 12 : columns === 2 ? 14 : 16;
   const imageSpacing = columns === 4 ? 40 : 80;
 
   const tableRows: TableRow[] = [];
@@ -354,8 +352,8 @@ export async function generateQrDocx(
     const cells: TableCell[] = [];
 
     for (const item of rowItems) {
-      const qrUrl = `${baseUrl.replace(/\/$/, '')}/q/EQ-${item.id}`;
-      const qrBuffer = await QRCode.toBuffer(qrUrl, {
+      const qrPayload = item.qrCode || encodeEquipmentQrToken(item.id);
+      const qrBuffer = await QRCode.toBuffer(qrPayload, {
         width: qrRasterPx,
         margin: 1,
         errorCorrectionLevel: 'M',
@@ -377,17 +375,6 @@ export async function generateQrDocx(
           right: { style: BorderStyle.SINGLE, size: 8, color: '64748B' },
         },
         children: [
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            children: [
-              new TextRun({
-                text: 'КАФЕДРАЛЬНЫЙ УЧЕТ',
-                size: headerFontSize,
-                bold: true,
-                color: '475569',
-              }),
-            ],
-          }),
           new Paragraph({
             alignment: AlignmentType.CENTER,
             children: [
@@ -431,20 +418,9 @@ export async function generateQrDocx(
             spacing: { before: 30 },
             children: [
               new TextRun({
-                text: `Тип: ${item.typeName} | Кабинет: ${item.roomNumber}`,
+                text: `Тип: ${item.typeName} | Каб. ${item.roomNumber}`,
                 size: metaFontSize,
                 color: '64748B',
-              }),
-            ],
-          }),
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            spacing: { before: 30 },
-            children: [
-              new TextRun({
-                text: `Шлюз: /q/EQ-${item.id}`,
-                size: gatewayFontSize,
-                color: '94A3B8',
               }),
             ],
           }),
@@ -481,7 +457,7 @@ export async function generateQrDocx(
             spacing: { after: 180 },
             children: [
               new TextRun({
-                text: 'ИС «Учет материальных ценностей»',
+                text: 'Инвентарные этикетки',
                 bold: true,
                 size: 28,
                 color: '1E3A8A',
@@ -493,7 +469,7 @@ export async function generateQrDocx(
             spacing: { after: 280 },
             children: [
               new TextRun({
-                text: `Инвентарные этикетки и QR-коды для оборудования кафедры (${items.length} шт. • QR ${sizeLabel})`,
+                text: `Комплект QR-наклеек (${items.length} шт. • QR ${sizeLabel})`,
                 italics: true,
                 size: 20,
                 color: '475569',
@@ -1624,6 +1600,8 @@ export async function generateTransferInvoiceDocx(
 }
 
 export interface GroupQrBatchData {
+  id?: number;
+  qrCode?: string;
   code: string;
   name: string;
   roomNumber?: string;
@@ -1632,7 +1610,7 @@ export interface GroupQrBatchData {
 
 export async function generateGroupQrDocx(
   batch: GroupQrBatchData,
-  baseUrl: string,
+  _baseUrl: string,
   options: QrDocxOptions = {}
 ): Promise<Buffer> {
   const qrSizeCm = normalizeQrSizeCm(options.qrSizeCm);
@@ -1640,8 +1618,8 @@ export async function generateGroupQrDocx(
   const qrRasterPx = cmToRasterPx(qrSizeCm);
   const sizeLabel = `${formatCmText(qrSizeCm)}×${formatCmText(qrSizeCm)} см`;
 
-  const qrUrl = `${baseUrl.replace(/\/$/, '')}/q/${batch.code}`;
-  const qrBuffer = await QRCode.toBuffer(qrUrl, {
+  const qrPayload = batch.qrCode || (batch.id ? encodeGroupQrToken(batch.id) : batch.code);
+  const qrBuffer = await QRCode.toBuffer(qrPayload, {
     width: qrRasterPx,
     margin: 1,
     errorCorrectionLevel: 'M',
@@ -1712,7 +1690,7 @@ export async function generateGroupQrDocx(
             spacing: { after: 150 },
             children: [
               new TextRun({
-                text: 'КАФЕДРАЛЬНЫЙ УЧЕТ МАТЕРИАЛЬНЫХ ЦЕННОСТЕЙ',
+                text: 'ИНВЕНТАРНАЯ КАРТОЧКА ГРУППЫ ОБОРУДОВАНИЯ',
                 bold: true,
                 size: 26,
                 color: '1E3A8A',
@@ -1724,7 +1702,7 @@ export async function generateGroupQrDocx(
             spacing: { after: 250 },
             children: [
               new TextRun({
-                text: `ГРУППОВОЙ QR-КОД ПАРТИИ ОБОРУДОВАНИЯ: ${batch.code}`,
+                text: `ГРУППОВОЙ QR-КОД: ${batch.code}`,
                 bold: true,
                 size: 20,
                 color: '0F172A',
@@ -1759,7 +1737,7 @@ export async function generateGroupQrDocx(
             spacing: { after: 300 },
             children: [
               new TextRun({
-                text: `Размер QR: ${sizeLabel}  •  Защищенный шлюз доступа: ${qrUrl}`,
+                text: `Размер QR: ${sizeLabel}  •  Код: ${qrPayload}`,
                 size: 14,
                 color: '64748B',
                 italics: true,

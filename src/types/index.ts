@@ -94,6 +94,7 @@ export interface Equipment {
   additional_fields: EquipmentAdditionalFields;
   writeoffState?: WriteoffState | null;
   writeoffDate?: string | null;
+  qrCode?: string;
 }
 
 export interface EquipmentIssue {

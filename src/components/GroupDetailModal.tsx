@@ -57,8 +57,9 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
       })
       .then(async (resData) => {
         setData(resData);
-        if (resData.qrUrl) {
-          const url = await QRCode.toDataURL(resData.qrUrl, {
+        const qrPayload = resData.qrCode || resData.batch?.code;
+        if (qrPayload) {
+          const url = await QRCode.toDataURL(qrPayload, {
             width: 220,
             margin: 1,
             errorCorrectionLevel: 'M',
@@ -194,13 +195,13 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
               </div>
               <div className="space-y-1 text-center sm:text-left flex-1">
                 <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wider">
-                  Единый шлюз доступа партии
+                  Внутренний код партии (без URL сайта)
                 </span>
                 <p className="text-xs font-mono text-slate-700 break-all select-all font-semibold">
-                  {data.qrUrl}
+                  {data.qrCode || data.batch?.code}
                 </p>
                 <p className="text-[11px] text-slate-500 leading-tight">
-                  🔒 Доступен сотрудникам кафедры при сканировании. Посторонним наблюдателям возвращается 404 (пустышка).
+                  🔒 Внутри QR зашит только непрозрачный код. Посторонние не смогут узнать адрес сайта.
                 </p>
                 <div className="pt-2 border-t border-slate-200/80 space-y-2">
                   <QrSizeSelector value={qrSizeCm} onChange={setQrSizeCm} compact />

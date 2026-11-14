@@ -53,6 +53,11 @@ import {
   getAllAdditionalFieldsForType,
   validateAdditionalFields,
 } from './src/server/validation.ts';
+import {
+  decodeOpaqueQrToken,
+  encodeEquipmentQrToken,
+  encodeGroupQrToken,
+} from './src/server/qr-token.ts';
 import { seedDatabaseIfEmpty } from './src/db/seed.ts';
 import { and, desc, eq, gte, ilike, inArray, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
 import path from 'path';
@@ -94,11 +99,19 @@ interface RateEntry {
 const apiRateStore = new Map<string, RateEntry>();
 const authRateStore = new Map<string, RateEntry>();
 const failedLoginStore = new Map<string, RateEntry>();
+const qrGatewayRateStore = new Map<string, RateEntry>();
+const qrProbeLogStore = new Map<string, RateEntry>();
 
 // Periodic cleanup of expired rate-limit entries
 setInterval(() => {
   const now = Date.now();
-  for (const store of [apiRateStore, authRateStore, failedLoginStore]) {
+  for (const store of [
+    apiRateStore,
+    authRateStore,
+    failedLoginStore,
+    qrGatewayRateStore,
+    qrProbeLogStore,
+  ]) {
     for (const [key, entry] of store.entries()) {
       if (entry.resetAt <= now) {
         store.delete(key);
@@ -1283,16 +1296,20 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
 
     const conditions: any[] = [];
 
-    // Search filter across name, inventory number, and DB ID
+    // Search filter across name, inventory number, DB ID, and opaque QR token
     if (search) {
       const cleanIdStr = search.trim().replace(/^#/, '');
       const parsedSearchId = /^\d+$/.test(cleanIdStr) ? Number(cleanIdStr) : null;
+      const decodedQr = decodeOpaqueQrToken(search);
       const searchConds: any[] = [
         ilike(equipment.name, `%${search}%`),
         ilike(equipment.inventory_number, `%${search}%`),
       ];
       if (parsedSearchId && Number.isSafeInteger(parsedSearchId) && parsedSearchId > 0) {
         searchConds.push(eq(equipment.id, parsedSearchId));
+      }
+      if (decodedQr?.kind === 'equipment') {
+        searchConds.push(eq(equipment.id, decodedQr.id));
       }
       conditions.push(or(...searchConds));
     }
@@ -1367,7 +1384,9 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
     if (search) {
       const q = search.toLowerCase();
       const qId = q.replace(/^#/, '');
+      const decodedQr = decodeOpaqueQrToken(search);
       filtered = filtered.filter((item: any) => {
+        if (decodedQr?.kind === 'equipment' && item.id === decodedQr.id) return true;
         if (String(item.id) === qId) return true;
         if (item.name?.toLowerCase().includes(q)) return true;
         if (item.inventory_number?.toLowerCase().includes(q)) return true;
@@ -1722,6 +1741,39 @@ app.get('/api/equipment/resolve/:code', requireAuth, async (req: AuthRequest, re
       return res.status(400).json({ error: 'Не удалось распознать код оборудования' });
     }
 
+    // Check signed opaque QR token first (new stealth format without URLs or sequential IDs)
+    const decodedOpaque = decodeOpaqueQrToken(rawCode);
+    if (decodedOpaque) {
+      if (decodedOpaque.kind === 'group') {
+        const [batch] = await db
+          .select({ code: equipmentBatches.code, name: equipmentBatches.name })
+          .from(equipmentBatches)
+          .where(eq(equipmentBatches.id, decodedOpaque.id))
+          .limit(1);
+
+        if (batch) {
+          return res.json({ kind: 'group', code: batch.code, name: batch.name });
+        }
+        return res.status(404).json({ error: 'Партия оборудования по данному QR-коду не найдена' });
+      }
+
+      const [itemByToken] = await db
+        .select({ id: equipment.id, name: equipment.name, inventory_number: equipment.inventory_number })
+        .from(equipment)
+        .where(eq(equipment.id, decodedOpaque.id))
+        .limit(1);
+
+      if (itemByToken) {
+        return res.json({
+          kind: 'equipment',
+          id: itemByToken.id,
+          name: itemByToken.name,
+          inventory_number: itemByToken.inventory_number,
+        });
+      }
+      return res.status(404).json({ error: 'Оборудование по данному QR-коду не найдено' });
+    }
+
     if (/^(GRP|BATCH)-/i.test(rawCode)) {
       const [batch] = await db
         .select({ code: equipmentBatches.code, name: equipmentBatches.name })
@@ -1894,6 +1946,7 @@ app.get('/api/equipment/:id', async (req: AuthRequest, res, next) => {
 
     res.json({
       ...item,
+      qrCode: encodeEquipmentQrToken(item.id),
       additional_fields: computeDynamicWarranty(item.additional_fields),
       writeoffState: isRegularUser ? null : item.writeoffState,
       writeoffDate: isRegularUser ? null : item.writeoffDate,
@@ -2385,6 +2438,7 @@ app.post('/api/equipment/qr-docx', requireAuth, requireRole('ADMIN', 'ENGINEER')
     const baseUrl = getPublicBaseUrl(req);
     const formatted = items.map((i: any) => ({
       ...i,
+      qrCode: encodeEquipmentQrToken(i.id),
       recivedDate: new Date(i.recived).toLocaleDateString('ru-RU'),
     }));
 
@@ -2459,8 +2513,7 @@ app.post('/api/equipment/qr-group', requireAuth, requireRole('ADMIN', 'ENGINEER'
       })
       .returning();
 
-    const baseUrl = getPublicBaseUrl(req);
-    const qrUrl = `${baseUrl}/q/${code}`;
+    const qrCode = encodeGroupQrToken(batch.id);
 
     await logAuditEvent({
       req,
@@ -2476,7 +2529,7 @@ app.post('/api/equipment/qr-group', requireAuth, requireRole('ADMIN', 'ENGINEER'
 
     res.status(201).json({
       ...batch,
-      qrUrl,
+      qrCode,
       itemsCount: items.length,
       items,
     });
@@ -2519,10 +2572,9 @@ app.get('/api/equipment/qr-group/:code', requireAuth, async (req: AuthRequest, r
           .where(inArray(equipment.id, ids))
       : [];
 
-    const baseUrl = getPublicBaseUrl(req);
     res.json({
       batch,
-      qrUrl: `${baseUrl}/q/${batch.code}`,
+      qrCode: encodeGroupQrToken(batch.id),
       items,
     });
   } catch (error: any) {
@@ -2581,6 +2633,8 @@ app.get('/api/equipment/qr-group/:code/docx', requireAuth, requireRole('ADMIN', 
     const baseUrl = getPublicBaseUrl(req);
     const docxBuffer = await generateGroupQrDocx(
       {
+        id: batch.id,
+        qrCode: encodeGroupQrToken(batch.id),
         code: batch.code,
         name: batch.name,
         roomNumber: items[0]?.roomNumber,
@@ -2619,46 +2673,90 @@ app.get('/api/equipment/qr-group/:code/docx', requireAuth, requireRole('ADMIN', 
 
 // ==========================================
 // PROTECTED QR GATEWAY ROUTE (/q/:code)
-// Spec: "В сам QR-код зашивается ссылка на единый шлюз вашей системы, например: /q/EQ-10492.
-// Проверка авторизации:
-// Если сессия есть (сотрудник): редирект в систему к оборудованию или партии.
-// Если сессии нет (случайный прохожий): Вариант «Пустышка» (404 Not Found)."
+// Stealth & Anti-DDoS:
+// - Strict per-IP rate limit (30 req/min)
+// - Unauthenticated visitors receive a sterile bare 404 Not Found
+//   with ZERO branding, ZERO department/university hints, and ZERO links
+// - Authenticated staff are routed directly to the equipment/group view
 // ==========================================
 app.get('/q/:code', optionalAuth, async (req: AuthRequest, res) => {
   try {
+    const clientIp = extractClientIp(req) || 'unknown';
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow');
+
+    const gatewayCheck = checkRateLimit(qrGatewayRateStore, clientIp, 30, 60 * 1000);
+    if (!gatewayCheck.allowed) {
+      return res
+        .status(429)
+        .type('text/plain')
+        .send('429 Too Many Requests');
+    }
+
     const rawCode = req.params.code?.trim() || '';
 
-    // 1. Unauthorized visitor (случайный прохожий) -> Вариант «Пустышка» (404 Not Found)
+    // 1. Unauthorized visitor -> Sterile 404 without site identity, links, or branding
     if (!req.user) {
-      return res.status(404).send(`<!DOCTYPE html>
-<html lang="ru">
+      const probeCheck = checkRateLimit(qrProbeLogStore, clientIp, 3, 15 * 60 * 1000);
+      if (!probeCheck.allowed && probeCheck.retryAfterSec > 0) {
+        // Throttled audit logging so DDoS/probing doesn't flood DB
+        const existingEntry = qrProbeLogStore.get(clientIp);
+        if (existingEntry && existingEntry.count === 3) {
+          existingEntry.count += 1;
+          await logAuditEvent({
+            req,
+            actor: { id: null, login: 'Аноним', role: 'ANONYMOUS' },
+            action: 'QR_GATEWAY_PROBE',
+            category: 'SECURITY',
+            severity: 'WARNING',
+            entityType: 'gateway',
+            entityId: rawCode.slice(0, 64) || null,
+            summary: `Множественные неавторизованные запросы к шлюзу QR с IP ${clientIp}`,
+            details: { ip: clientIp },
+          });
+        }
+      }
+
+      return res.status(404).type('text/html').send(`<!DOCTYPE html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="robots" content="noindex, nofollow">
   <title>404 Not Found</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f8fafc; color: #334155; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1rem; }
-    .card { text-align: center; max-width: 420px; width: 100%; padding: 2.5rem 2rem; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.05); }
-    h1 { font-size: 3.5rem; margin: 0 0 0.5rem; color: #0f172a; font-weight: 800; letter-spacing: -0.05em; }
-    p { margin: 0 0 1.5rem; color: #64748b; font-size: 0.95rem; line-height: 1.5; }
-    .staff-box { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid #f1f5f9; }
-    .staff-link { display: inline-block; font-size: 0.8rem; color: #64748b; text-decoration: none; padding: 0.5rem 1rem; border-radius: 8px; background: #f8fafc; border: 1px solid #e2e8f0; transition: all 0.15s; }
-    .staff-link:hover { color: #2563eb; background: #eff6ff; border-color: #bfdbfe; }
-  </style>
 </head>
 <body>
-  <div class="card">
-    <h1>404</h1>
-    <p>Запрашиваемый ресурс не найден или был перемещен.<br><span style="font-size:0.85rem;color:#94a3b8;">The requested object does not exist on this server.</span></p>
-    <div class="staff-box">
-      <a href="/?from_qr=${encodeURIComponent(rawCode)}" class="staff-link">🔒 Вход для сотрудников кафедры</a>
-    </div>
-  </div>
+  <h1>404 Not Found</h1>
+  <p>The requested URL was not found on this server.</p>
 </body>
 </html>`);
     }
 
-    // 2. Authorized user: Check if it's a group batch
+    // 2. Authorized user: Decode opaque HMAC token first
+    const decodedOpaque = decodeOpaqueQrToken(rawCode);
+    if (decodedOpaque) {
+      if (decodedOpaque.kind === 'group') {
+        const [batch] = await db
+          .select({ code: equipmentBatches.code })
+          .from(equipmentBatches)
+          .where(eq(equipmentBatches.id, decodedOpaque.id))
+          .limit(1);
+        if (batch) {
+          return res.redirect(302, `/?openGroup=${encodeURIComponent(batch.code)}`);
+        }
+      } else {
+        const [itemByToken] = await db
+          .select({ id: equipment.id })
+          .from(equipment)
+          .where(eq(equipment.id, decodedOpaque.id))
+          .limit(1);
+        if (itemByToken) {
+          return res.redirect(302, `/?openEquipment=${itemByToken.id}`);
+        }
+      }
+    }
+
+    // 3. Authorized user: Legacy Group batch code
     if (rawCode.startsWith('GRP-') || rawCode.startsWith('grp-') || rawCode.startsWith('BATCH-')) {
       const [batch] = await db
         .select()
@@ -2671,13 +2769,12 @@ app.get('/q/:code', optionalAuth, async (req: AuthRequest, res) => {
       }
     }
 
-    // 3. Authorized user: Parse single equipment identifier (e.g. "EQ-10492", "10492", "INV-2022-001")
+    // 4. Authorized user: Legacy Equipment identifier ("EQ-10492", "10492", "INV-2022-001")
     let cleanId = rawCode;
     if (/^EQ-\d+$/i.test(rawCode)) {
       cleanId = rawCode.replace(/^EQ-/i, '');
     }
 
-    // Try finding by primary key ID if numeric
     if (/^\d+$/.test(cleanId)) {
       const [itemById] = await db
         .select({ id: equipment.id })
@@ -2690,7 +2787,6 @@ app.get('/q/:code', optionalAuth, async (req: AuthRequest, res) => {
       }
     }
 
-    // Try finding by inventory number
     const [itemByInv] = await db
       .select({ id: equipment.id })
       .from(equipment)
@@ -2707,17 +2803,21 @@ app.get('/q/:code', optionalAuth, async (req: AuthRequest, res) => {
       return res.redirect(302, `/?openEquipment=${itemByInv.id}`);
     }
 
-    // Item not found in DB -> 404
-    return res.status(404).send(`<!DOCTYPE html>
-<html lang="ru"><head><meta charset="utf-8"><title>404 Not Found</title></head>
-<body style="font-family:sans-serif;text-align:center;padding:3rem;">
-  <h2>404 — Оборудование не найдено</h2>
-  <p>Объект с идентификатором "${rawCode}" не зарегистрирован в базе данных кафедры.</p>
-  <a href="/">Перейти в систему учета</a>
-</body></html>`);
+    return res.status(404).type('text/html').send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="robots" content="noindex, nofollow">
+  <title>404 Not Found</title>
+</head>
+<body>
+  <h1>404 Not Found</h1>
+  <p>The requested URL was not found on this server.</p>
+</body>
+</html>`);
   } catch (error: any) {
     console.error('QR Gateway error:', error);
-    res.status(500).send('Ошибка обработки шлюза QR-кода');
+    res.status(500).type('text/plain').send('Internal Server Error');
   }
 });
 

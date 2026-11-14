@@ -40,7 +40,7 @@ export const GroupQrModal: React.FC<GroupQrModalProps> = ({
   const [generatedBatch, setGeneratedBatch] = useState<{
     code: string;
     name: string;
-    qrUrl: string;
+    qrCode: string;
     itemsCount: number;
   } | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
@@ -70,7 +70,7 @@ export const GroupQrModal: React.FC<GroupQrModalProps> = ({
       if (!res.ok) throw new Error(data.error || 'Ошибка создания группового QR-кода');
 
       setGeneratedBatch(data);
-      const url = await QRCode.toDataURL(data.qrUrl, {
+      const url = await QRCode.toDataURL(data.qrCode || data.code, {
         width: 280,
         margin: 1,
         errorCorrectionLevel: 'M',
@@ -83,9 +83,9 @@ export const GroupQrModal: React.FC<GroupQrModalProps> = ({
     }
   };
 
-  const handleCopyLink = () => {
+  const handleCopyCode = () => {
     if (!generatedBatch) return;
-    navigator.clipboard.writeText(generatedBatch.qrUrl);
+    navigator.clipboard.writeText(generatedBatch.qrCode || generatedBatch.code);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -239,18 +239,18 @@ export const GroupQrModal: React.FC<GroupQrModalProps> = ({
               </span>
             </div>
 
-            {/* Gateway link box */}
+            {/* Opaque QR code box */}
             <div className="flex items-center gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-left">
               <div className="flex-1 min-w-0">
                 <span className="block text-[10px] text-slate-400 font-semibold uppercase">
-                  Шлюз доступа
+                  Внутренний QR-код (без URL сайта)
                 </span>
                 <span className="text-xs font-mono text-slate-800 truncate block">
-                  {generatedBatch.qrUrl}
+                  {generatedBatch.qrCode || generatedBatch.code}
                 </span>
               </div>
               <button
-                onClick={handleCopyLink}
+                onClick={handleCopyCode}
                 className="px-2.5 py-1.5 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg text-xs font-medium text-slate-700 flex items-center gap-1 shrink-0"
               >
                 {copied ? (

@@ -69,7 +69,11 @@
 - **Защита от перебора и DoS**:
   - Глобальный rate limit на `/api/*`: `400` запросов в минуту с одного IP.
   - Строгий rate limit на `/api/auth/*` (кроме `/me`): `40` запросов за 15 минут с IP.
+  - Лимит на шлюз `/q/*`: `30` запросов в минуту с IP; при частых неавторизованных обращениях фиксируется событие `QR_GATEWAY_PROBE` (`SECURITY`).
   - Блокировка подбора пароля (`failedLoginStore`): `5` неудачных попыток входа по паре `IP + login` блокируют вход на `15` минут с записью события `AUTH_BRUTEFORCE_LOCK` (`CRITICAL`).
+- **Скрытые непрозрачные QR-коды (`src/server/qr-token.ts`) и стерильный шлюз `/q/:code`**:
+  - В QR-код зашивается только 18-символьный непрозрачный Base32-токен (ID замаскирован HMAC-SHA256) **без URL, домена, адреса шлюза и упоминания кафедры/вуза**.
+  - При обращении к `/q/:code` без активной сессии сервер возвращает минималистичный `404 Not Found` без стилей, бренда, упоминаний организации и ссылок входа (с `X-Robots-Tag: noindex, nofollow`).
 - **Защита от CSRF и заголовки безопасности**:
   - Проверка заголовка `Origin` на всех изменяющих запросах (`POST`, `PUT`, `PATCH`, `DELETE`) относительно `Host`/`X-Forwarded-Host` и `APP_URL`.
   - Отключён `X-Powered-By`; выставляются `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy: camera=(self), microphone=(), geolocation=()`, `X-Permitted-Cross-Domain-Policies: none`, `Strict-Transport-Security` (на HTTPS), `Cache-Control: no-store` для `/api/*`.

@@ -94,10 +94,12 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       })
       .then((detail) => {
         setData(detail);
-        const qrUrl = `${window.location.origin}/q/EQ-${detail.id}`;
-        QRCode.toDataURL(qrUrl, { width: 220, margin: 1 })
-          .then(setQrDataUrl)
-          .catch(console.error);
+        const qrPayload = detail.qrCode || detail.inventory_number || '';
+        if (qrPayload) {
+          QRCode.toDataURL(qrPayload, { width: 220, margin: 1 })
+            .then(setQrDataUrl)
+            .catch(console.error);
+        }
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
@@ -662,11 +664,13 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                   <span className="text-[11px] font-mono text-slate-700 font-bold">
                     Инв. № {data.inventory_number}
                   </span>
-                  <div className="mt-1 px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700 text-[10px] font-mono">
-                    Шлюз: /q/EQ-{data.id}
-                  </div>
+                  {data.qrCode && (
+                    <div className="mt-1 px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700 text-[10px] font-mono select-all">
+                      Код QR: {data.qrCode}
+                    </div>
+                  )}
                   <p className="text-[10px] text-slate-500 mt-1 max-w-[200px] leading-tight">
-                    🔒 Защищенный шлюз: сотрудникам открывает паспорт, посторонним выдает 404 (пустышку).
+                    🔒 Внутри QR зашит только внутренний код без адреса сайта и домена.
                   </p>
                   <div className="mt-2.5 flex flex-col items-center gap-2 w-full">
                     {(isAdmin || isEngineer) && (
