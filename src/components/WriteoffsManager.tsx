@@ -138,9 +138,14 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
     }
   };
 
-  const fetchAvailableEquipment = async () => {
+  const fetchAvailableEquipment = async (searchQuery = '') => {
     try {
-      const res = await apiFetch('/api/equipment?limit=300');
+      const params = new URLSearchParams();
+      params.set('limit', '200');
+      if (searchQuery.trim()) {
+        params.set('search', searchQuery.trim());
+      }
+      const res = await apiFetch(`/api/equipment?${params.toString()}`);
       const data = await res.json();
       if (Array.isArray(data?.items)) {
         const active = data.items.filter((i: Equipment) => i.writeoffState !== 'WRITTEN_OFF');
@@ -154,6 +159,14 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
   useEffect(() => {
     fetchItems();
   }, [filterState]);
+
+  useEffect(() => {
+    if (!showNewWriteoffModal) return;
+    const timer = setTimeout(() => {
+      fetchAvailableEquipment(modalSearch);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [modalSearch, showNewWriteoffModal]);
 
   const visibleItems = items.filter((item) => {
     if (caseFilter === 'CASE_1') return detectItemCase(item) === 'CASE_1';
@@ -489,7 +502,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
       {/* Document Parameters Bar */}
       <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 text-xs items-end">
         <div>
-          <label className="block text-[11px] font-semibold text-slate-600 mb-1 flex items-center gap-1">
+          <label className="text-[11px] font-semibold text-slate-600 mb-1 flex items-center gap-1">
             <Calendar className="w-3.5 h-3.5 text-blue-600" />
             Дата списания
           </label>
@@ -808,12 +821,12 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                         </span>
                         <span>
                           • Цена:{' '}
-                          <strong className="text-slate-700">
+                          <strong className="text-slate-700 tabular-nums">
                             {kitPart && detectedCase !== 'CASE_2' && detectedCase !== 'CASE_3'
                               ? 'в составе комплекта'
                               : `${formatCostRu(unitCost)} BYN`}
                           </strong>
-                          {qty > 1 && ` × ${qty} = ${formatCostRu(totalCost)} BYN`}
+                          {qty > 1 && <span className="tabular-nums">{` × ${qty} = ${formatCostRu(totalCost)} BYN`}</span>}
                         </span>
                       </div>
                     </div>
@@ -973,7 +986,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                                 {qty} шт.
                               </span>
                             )}
-                            <span>{formatCostRu(eq.initial_cost)} BYN</span>
+                            <span className="tabular-nums">{formatCostRu(eq.initial_cost)} BYN</span>
                           </div>
                         </label>
                       );

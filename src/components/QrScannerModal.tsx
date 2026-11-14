@@ -22,6 +22,7 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [cameraActive, setCameraActive] = useState(false);
   const [scanSuccess, setScanSuccess] = useState(false);
+  const [resolving, setResolving] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -29,10 +30,10 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
   const animationFrameRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Load equipment list on open for ID and inventory matching
+  // Load first few equipment items for quick jump list on open
   useEffect(() => {
     if (isOpen) {
-      apiFetch('/api/equipment?limit=200')
+      apiFetch('/api/equipment?limit=15')
         .then((r) => r.json())
         .then((data) => {
           if (Array.isArray(data?.items)) setEquipmentList(data.items);
@@ -43,6 +44,7 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
       stopCamera();
       setError(null);
       setScanSuccess(false);
+      setResolving(false);
       setManualInput('');
     }
   }, [isOpen]);
@@ -71,68 +73,59 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
     }
   }, [cameraActive]);
 
-  const handleProcessScannedCode = (rawText: string): boolean => {
+  const handleProcessScannedCode = async (rawText: string): Promise<boolean> => {
     let raw = rawText.trim();
     if (!raw) return false;
 
-    // Check if it's a gateway URL like https://domain/q/EQ-10492 or /q/GRP-2026-1234
     const urlMatch = raw.match(/\/q\/([^/?#]+)/i);
     if (urlMatch) {
-      raw = decodeURIComponent(urlMatch[1]);
+      raw = decodeURIComponent(urlMatch[1]).trim();
     }
 
-    // Check if group code
-    if (raw.startsWith('GRP-') || raw.startsWith('grp-') || raw.startsWith('BATCH-')) {
-      if (onSelectGroupCode) {
-        stopCamera();
-        onSelectGroupCode(raw);
-        onClose();
-        return true;
+    setResolving(true);
+    setError(null);
+    try {
+      const res = await apiFetch(`/api/equipment/resolve/${encodeURIComponent(raw)}`);
+      if (res.ok) {
+        const resolved = await res.json();
+        if (resolved.kind === 'group' && resolved.code && onSelectGroupCode) {
+          stopCamera();
+          onSelectGroupCode(resolved.code);
+          onClose();
+          return true;
+        }
+        if (resolved.kind === 'equipment' && resolved.id) {
+          stopCamera();
+          onSelectEquipmentId(Number(resolved.id));
+          onClose();
+          return true;
+        }
       }
+
+      // Fallback search by name/partial inventory number across server DB
+      const searchRes = await apiFetch(`/api/equipment?search=${encodeURIComponent(raw)}&limit=10`);
+      if (searchRes.ok) {
+        const searchData = await searchRes.json();
+        const matches: Equipment[] = Array.isArray(searchData?.items) ? searchData.items : [];
+        if (matches.length === 1) {
+          stopCamera();
+          onSelectEquipmentId(matches[0].id);
+          onClose();
+          return true;
+        }
+        if (matches.length > 1) {
+          setEquipmentList(matches);
+          setError(`Найдено совпадений: ${matches.length}. Выберите нужную позицию из списка ниже.`);
+          return false;
+        }
+      }
+      return false;
+    } catch (e) {
+      console.error('QR resolve error:', e);
+      return false;
+    } finally {
+      setResolving(false);
     }
-
-    // Strip EQ- prefix if present
-    let cleanCode = raw;
-    if (/^EQ-\d+$/i.test(raw)) {
-      cleanCode = raw.replace(/^EQ-/i, '');
-    }
-
-    const term = cleanCode.toLowerCase();
-
-    // Check if direct ID
-    const numId = Number(cleanCode);
-    if (!isNaN(numId) && equipmentList.some((e) => e.id === numId)) {
-      stopCamera();
-      onSelectEquipmentId(numId);
-      onClose();
-      return true;
-    }
-
-    // Check if inventory number or name
-    const found = equipmentList.find(
-      (e) =>
-        e.inventory_number.toLowerCase() === term ||
-        e.inventory_number.toLowerCase() === raw.toLowerCase() ||
-        e.inventory_number.toLowerCase().includes(term) ||
-        e.name.toLowerCase().includes(term)
-    );
-
-    if (found) {
-      stopCamera();
-      onSelectEquipmentId(found.id);
-      onClose();
-      return true;
-    }
-
-    // If ID is valid number even if not in first page of cached equipment
-    if (!isNaN(numId) && numId > 0) {
-      stopCamera();
-      onSelectEquipmentId(numId);
-      onClose();
-      return true;
-    }
-
-    return false;
   };
 
   const scanLoop = () => {
@@ -159,12 +152,14 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
 
       if (code && code.data) {
         setScanSuccess(true);
-        const processed = handleProcessScannedCode(code.data);
-        if (processed) {
-          return; // Modal closed
-        } else {
-          setError(`Распознан QR: "${code.data}", но объект не найден в реестре.`);
-        }
+        stopCamera();
+        handleProcessScannedCode(code.data).then((processed) => {
+          if (!processed) {
+            setScanSuccess(false);
+            setError(`Распознан QR: "${code.data}", но объект не найден в реестре.`);
+          }
+        });
+        return;
       }
     }
 
@@ -259,10 +254,12 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
           const code = jsQR(imageData.data, imageData.width, imageData.height);
           if (code && code.data) {
             setScanSuccess(true);
-            const processed = handleProcessScannedCode(code.data);
-            if (!processed) {
-              setError(`В файле найден код "${code.data}", но объект не найден в системе.`);
-            }
+            handleProcessScannedCode(code.data).then((processed) => {
+              if (!processed) {
+                setScanSuccess(false);
+                setError((prev) => prev || `В файле найден код "${code.data}", но объект не найден в системе.`);
+              }
+            });
           } else {
             setError('На загруженной фотографии QR-код не распознан. Попробуйте более чёткий снимок.');
           }
@@ -274,10 +271,11 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
     e.target.value = '';
   };
 
-  const handleManualSearch = () => {
-    const processed = handleProcessScannedCode(manualInput);
-    if (!processed && manualInput.trim()) {
-      setError(`Оборудование или партия по запросу "${manualInput}" не найдено`);
+  const handleManualSearch = async () => {
+    if (!manualInput.trim()) return;
+    const processed = await handleProcessScannedCode(manualInput);
+    if (!processed) {
+      setError((prev) => prev || `Оборудование или партия по запросу "${manualInput}" не найдено`);
     }
   };
 
@@ -345,7 +343,7 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
                     muted
                   />
                   {/* Aiming Reticle */}
-                  <div className="absolute inset-8 border-2 border-dashed border-emerald-400 rounded-xl pointer-events-none animate-pulse flex items-center justify-center">
+                  <div className="absolute inset-8 border-2 border-dashed border-emerald-400 rounded-xl pointer-events-none flex items-center justify-center">
                     <span className="text-[10px] text-white/90 bg-black/60 px-2 py-0.5 rounded-full font-medium">
                       Наведите на QR-код
                     </span>
@@ -435,39 +433,46 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
               <button
                 type="button"
                 onClick={handleManualSearch}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
+                disabled={resolving || !manualInput.trim()}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-900 disabled:opacity-50 text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
               >
-                Найти
+                {resolving ? 'Поиск...' : 'Найти'}
               </button>
             </div>
           </div>
 
-          {/* Quick Simulation List */}
+          {/* Quick Jump List */}
           <div>
             <span className="block text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wider">
               Быстрый переход к оборудованию кафедры:
             </span>
-            <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-              {(Array.isArray(equipmentList) ? equipmentList : []).slice(0, 6).map((item) => (
-                <button
-                  key={item.id}
-                  onClick={() => handleSelectPredefined(item.id)}
-                  className="w-full flex items-center justify-between p-2.5 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/50 transition-all text-left text-xs cursor-pointer"
-                >
-                  <div className="flex items-center gap-2 truncate">
-                    <span className="font-mono font-bold bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-[11px]">
-                      {item.inventory_number}
+            {equipmentList.length === 0 ? (
+              <div className="p-3 rounded-xl border border-dashed border-slate-200 text-center text-xs text-slate-400">
+                В реестре пока нет зарегистрированного оборудования
+              </div>
+            ) : (
+              <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                {equipmentList.slice(0, 6).map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => handleSelectPredefined(item.id)}
+                    className="w-full flex items-center justify-between p-2.5 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/50 transition-all text-left text-xs cursor-pointer"
+                  >
+                    <div className="flex items-center gap-2 truncate">
+                      <span className="font-mono font-bold bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-[11px] tabular-nums">
+                        {item.inventory_number}
+                      </span>
+                      <span className="font-medium text-slate-900 truncate">
+                        {item.name}
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-slate-500 shrink-0 tabular-nums">
+                      каб. {item.roomNumber}
                     </span>
-                    <span className="font-medium text-slate-900 truncate">
-                      {item.name}
-                    </span>
-                  </div>
-                  <span className="text-[11px] text-slate-500 shrink-0">
-                    каб. {item.roomNumber}
-                  </span>
-                </button>
-              ))}
-            </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>

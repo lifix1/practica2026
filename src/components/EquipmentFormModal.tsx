@@ -379,19 +379,25 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
               <label className="block text-xs font-semibold text-slate-700 mb-1">
                 Тип оборудования *
               </label>
-              <select
-                value={typeId}
-                onChange={(e) => setTypeId(Number(e.target.value))}
-                className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                required
-              >
-                <option value="">Выберите тип...</option>
-                {(Array.isArray(types) ? types : []).map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.name}
-                  </option>
-                ))}
-              </select>
+              {Array.isArray(types) && types.length === 0 ? (
+                <div className="p-2.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 text-[11px] font-medium">
+                  Справочник типов пуст — сначала создайте тип во вкладке «Типы и поля».
+                </div>
+              ) : (
+                <select
+                  value={typeId}
+                  onChange={(e) => setTypeId(Number(e.target.value))}
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                  required
+                >
+                  <option value="">Выберите тип...</option>
+                  {(Array.isArray(types) ? types : []).map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              )}
             </div>
 
             <div className="sm:col-span-2">
@@ -412,19 +418,25 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
               <label className="block text-xs font-semibold text-slate-700 mb-1">
                 Помещение / Аудитория *
               </label>
-              <select
-                value={roomId}
-                onChange={(e) => setRoomId(Number(e.target.value))}
-                className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                required
-              >
-                <option value="">Выберите кабинет...</option>
-                {(Array.isArray(rooms) ? rooms : []).map((r) => (
-                  <option key={r.id} value={r.id}>
-                    Ауд. {r.number} ({r.floor} этаж)
-                  </option>
-                ))}
-              </select>
+              {Array.isArray(rooms) && rooms.length === 0 ? (
+                <div className="p-2.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 text-[11px] font-medium">
+                  Справочник помещений пуст — сначала добавьте аудиторию во вкладке «Кабинеты».
+                </div>
+              ) : (
+                <select
+                  value={roomId}
+                  onChange={(e) => setRoomId(Number(e.target.value))}
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
+                  required
+                >
+                  <option value="">Выберите кабинет...</option>
+                  {(Array.isArray(rooms) ? rooms : []).map((r) => (
+                    <option key={r.id} value={r.id}>
+                      Ауд. {r.number} ({r.floor} этаж)
+                    </option>
+                  ))}
+                </select>
+              )}
             </div>
 
             <div>
@@ -472,7 +484,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
           {/* Department Manual Fields (Columns G-R) */}
           <div className="border-t border-slate-200 pt-4 space-y-4">
             <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-              Характеристики учета кафедры (столбцы G–R)
+              Характеристики учета кафедры
             </h4>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -791,8 +803,8 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
                           required={field.is_required}
                         >
                           <option value="">Не выбрано</option>
-                          <option value="true">Да (True)</option>
-                          <option value="false">Нет (False)</option>
+                          <option value="true">Да</option>
+                          <option value="false">Нет</option>
                         </select>
                       ) : field.data_type === 'DATE' ? (
                         <input

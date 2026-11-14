@@ -136,3 +136,74 @@ export interface ActiveAudit {
   verifiedCount: number;
   pendingCount: number;
 }
+
+export interface InventoryHistoryItem {
+  id: number;
+  auditor_ext_id: number;
+  auditorLogin?: string | null;
+  started_at: string;
+  finished_at: string;
+  totalCount: number;
+  verifiedCount: number;
+  pendingCount: number;
+}
+
+export type AuditCategory =
+  | 'AUTH'
+  | 'SECURITY'
+  | 'ADMIN'
+  | 'EQUIPMENT'
+  | 'MAINTENANCE'
+  | 'TRANSFER'
+  | 'INVENTORY'
+  | 'WRITEOFF'
+  | 'DOCUMENT';
+
+export type AuditSeverity = 'INFO' | 'WARNING' | 'CRITICAL';
+
+export interface AuditLogCapabilities {
+  role: UserRole;
+  roleLabel: string;
+  scope: 'ALL' | 'OPERATIONAL' | 'OWN';
+  scopeTitle: string;
+  scopeDescription: string;
+  allowedCategories: AuditCategory[];
+  canViewAllUsers: boolean;
+  canViewSecurityEvents: boolean;
+  canViewTechnicalMeta: boolean;
+  canExport: boolean;
+  canPurge: boolean;
+}
+
+export interface AuditLogItem {
+  id: number;
+  created_at: string;
+  actor_id: number | null;
+  actor_login: string | null;
+  actor_role: string | null;
+  action: string;
+  category: AuditCategory;
+  severity: AuditSeverity;
+  entity_type: string | null;
+  entity_id: string | null;
+  entity_label: string | null;
+  summary: string;
+  details: Record<string, any> | null;
+  ip_address?: string | null;
+  user_agent?: string | null;
+}
+
+export interface AuditLogsResponse {
+  items: AuditLogItem[];
+  total: number;
+  page: number;
+  totalPages: number;
+  stats: {
+    total: number;
+    info: number;
+    warning: number;
+    critical: number;
+  };
+  capabilities: AuditLogCapabilities;
+  actors?: Array<{ id: number | null; login: string; role: string }>;
+}

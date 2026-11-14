@@ -11,6 +11,8 @@ import {
   Bell,
   LogOut,
   UserCheck,
+  ScrollText,
+  KeyRound,
 } from 'lucide-react';
 import type { User } from '../types/index.ts';
 
@@ -22,6 +24,7 @@ interface HeaderProps {
   onOpenNotifications: () => void;
   onOpenQrScanner: () => void;
   onOpenAuth: () => void;
+  onOpenChangePassword: () => void;
   onLogout: () => void;
   hasActiveAudit: boolean;
 }
@@ -34,6 +37,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenNotifications,
   onOpenQrScanner,
   onOpenAuth,
+  onOpenChangePassword,
   onLogout,
   hasActiveAudit,
 }) => {
@@ -76,6 +80,9 @@ export const Header: React.FC<HeaderProps> = ({
         ]
       : []),
     { id: 'rooms', label: 'Кабинеты', icon: DoorOpen },
+    ...(currentUser
+      ? [{ id: 'logs', label: 'Журнал', icon: ScrollText }]
+      : []),
     ...(currentUser?.role === 'ADMIN'
       ? [{ id: 'users', label: 'Пользователи', icon: Users }]
       : []),
@@ -97,11 +104,11 @@ export const Header: React.FC<HeaderProps> = ({
                   Учет материальных ценностей
                 </h1>
                 <span className="hidden sm:inline-block text-[11px] font-mono uppercase bg-slate-100 text-slate-600 px-2 py-0.5 rounded-md font-semibold">
-                  Кафедра
+                  Кафедра ПиСП
                 </span>
               </div>
               <p className="text-xs text-slate-500 hidden sm:block">
-                PostgreSQL • Drizzle ORM • Инвентаризация и QR-метки
+                ВГУ имени П.М. Машерова • Инвентаризация и QR-учёт
               </p>
             </div>
           </div>
@@ -127,7 +134,7 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <Bell className="w-5 h-5" />
                 {unreadCount > 0 && (
-                  <span className="absolute top-1 right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-600 text-[10px] font-bold text-white ring-2 ring-white">
+                  <span className="absolute top-1 right-1 flex h-4 w-4 items-center justify-center rounded-full bg-red-600 text-[10px] font-bold text-white ring-2 ring-white tabular-nums">
                     {unreadCount > 9 ? '9+' : unreadCount}
                   </span>
                 )}
@@ -136,13 +143,20 @@ export const Header: React.FC<HeaderProps> = ({
 
             {/* User Profile / Login */}
             {currentUser ? (
-              <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
-                <div className="text-right hidden sm:block">
+              <div className="flex items-center gap-1.5 pl-2 border-l border-slate-200">
+                <div className="text-right hidden sm:block mr-1">
                   <div className="text-xs font-semibold text-slate-900 leading-tight">
                     {currentUser.login}
                   </div>
                   <div className="mt-0.5">{getRoleBadge(currentUser.role)}</div>
                 </div>
+                <button
+                  onClick={onOpenChangePassword}
+                  title="Сменить пароль"
+                  className="p-2 text-slate-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                >
+                  <KeyRound className="w-4 h-4" />
+                </button>
                 <button
                   onClick={onLogout}
                   title="Выйти из системы"
@@ -184,7 +198,7 @@ export const Header: React.FC<HeaderProps> = ({
                   <Icon className={`w-4 h-4 ${isActive ? 'text-blue-600' : 'text-slate-400'}`} />
                   <span>{item.label}</span>
                   {item.alert && (
-                    <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                    <span className="w-2 h-2 rounded-full bg-amber-500" />
                   )}
                 </button>
               );

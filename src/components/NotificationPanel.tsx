@@ -29,7 +29,7 @@ export const NotificationPanel: React.FC<NotificationPanelProps> = ({
             <div>
               <h3 className="font-bold text-sm">Уведомления о неисправностях</h3>
               <p className="text-[11px] text-slate-400">
-                Таблица notification (удаление после просмотра)
+                Автоматическое закрытие после просмотра
               </p>
             </div>
           </div>
@@ -86,7 +86,7 @@ export const NotificationPanel: React.FC<NotificationPanelProps> = ({
                 </p>
 
                 <div className="flex items-center justify-between pt-1">
-                  <span className="text-[10px] text-slate-400">
+                  <span className="text-[10px] text-slate-400 tabular-nums">
                     {new Date(n.created_at).toLocaleString('ru-RU')}
                   </span>
                   <button

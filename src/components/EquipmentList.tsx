@@ -25,6 +25,7 @@ import {
 import type { Equipment, EquipmentType, Room, User, AdditionalField } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
 import { GroupQrModal } from './GroupQrModal.tsx';
+import { QrSizeSelector, getColumnsForQrSize } from './QrSizeSelector.tsx';
 
 interface EquipmentListProps {
   currentUser: User | null;
@@ -114,6 +115,8 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
   // Bulk selection
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [generatingQrDocx, setGeneratingQrDocx] = useState(false);
+  const [showQrPrintModal, setShowQrPrintModal] = useState(false);
+  const [qrSizeCm, setQrSizeCm] = useState<number>(3);
 
   // Bulk Writeoff Modal
   const [showWriteoffModal, setShowWriteoffModal] = useState(false);
@@ -313,24 +316,33 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
   const handleGenerateQrDocx = async () => {
     if (selectedIds.length === 0) return;
     setGeneratingQrDocx(true);
+    setActionError(null);
     try {
       const res = await apiFetch('/api/equipment/qr-docx', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ equipment_ids: selectedIds }),
+        body: JSON.stringify({
+          equipment_ids: selectedIds,
+          qr_size_cm: qrSizeCm,
+        }),
       });
 
-      if (!res.ok) throw new Error('Ошибка генерации DOCX');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Ошибка генерации DOCX');
+      }
 
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `equipment-qr-codes-${new Date().toISOString().slice(0, 10)}.docx`;
+      const sizeSlug = String(qrSizeCm).replace('.', '_');
+      a.download = `equipment-qr-${sizeSlug}cm-${new Date().toISOString().slice(0, 10)}.docx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
       window.URL.revokeObjectURL(url);
+      setShowQrPrintModal(false);
     } catch (err: any) {
       setActionError(err.message);
     } finally {
@@ -991,13 +1003,15 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
 
           <div className="flex flex-wrap items-center gap-2">
             <button
-              onClick={handleGenerateQrDocx}
+              onClick={() => setShowQrPrintModal(true)}
               disabled={generatingQrDocx}
               className="px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 transition-colors"
             >
               <QrCode className="w-4 h-4 text-indigo-300" />
               <span>
-                {generatingQrDocx ? 'Формирование DOCX...' : 'Индивидуальные QR (DOCX)'}
+                {generatingQrDocx
+                  ? 'Формирование DOCX...'
+                  : `Индивидуальные QR (${qrSizeCm}×${qrSizeCm} см)`}
               </span>
             </button>
 
@@ -1079,6 +1093,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                     )}
                   </button>
                 </th>
+                <th className="p-3 w-14">ID</th>
                 <th className="p-3">Инв. номер</th>
                 <th className="p-3">Наименование и описание</th>
                 <th className="p-3">Тип / Бухучет</th>
@@ -1093,14 +1108,21 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
             <tbody className="divide-y divide-slate-100">
               {loading && items.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="p-8 text-center text-slate-400">
+                  <td colSpan={11} className="p-8 text-center text-slate-400">
                     Загрузка списка оборудования...
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={10} className="p-8 text-center text-slate-400">
-                    Оборудование по заданным критериям не найдено
+                  <td colSpan={11} className="p-10 text-center text-slate-500">
+                    <div className="font-semibold text-slate-700 text-xs mb-1">
+                      Оборудование не найдено
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      {total === 0
+                        ? 'В реестре пока нет материальных ценностей — добавьте оборудование вручную или загрузите Excel-таблицу.'
+                        : 'Попробуйте изменить параметры поиска или сбросить фильтры.'}
+                    </p>
                   </td>
                 </tr>
               ) : (
@@ -1131,6 +1153,9 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                             <Square className="w-4 h-4" />
                           )}
                         </button>
+                      </td>
+                      <td className="p-3 font-mono font-semibold text-slate-500 whitespace-nowrap tabular-nums">
+                        #{item.id}
                       </td>
                       <td className="p-3 font-mono font-bold text-blue-700 whitespace-nowrap">
                         <div>{item.inventory_number}</div>
@@ -1266,7 +1291,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                           </div>
                         )}
                       </td>
-                      <td className="p-3 text-slate-800 whitespace-nowrap font-medium">
+                      <td className="p-3 text-slate-800 whitespace-nowrap font-medium tabular-nums">
                         {Number(item.residual_cost).toLocaleString('ru-RU', {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,
@@ -1348,11 +1373,11 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                 onChange={(e: any) => setWriteoffState(e.target.value)}
                 className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none"
               >
-                <option value="PREPARING">Готовится к списанию (PREPARING)</option>
+                <option value="PREPARING">Готовится к списанию</option>
                 <option value="DOCUMENTS_PREPARATION">
-                  В процессе списания (DOCUMENTS_PREPARATION)
+                  В процессе списания (подготовка документов)
                 </option>
-                <option value="WRITTEN_OFF">Списано (WRITTEN_OFF)</option>
+                <option value="WRITTEN_OFF">Списано с баланса</option>
               </select>
             </div>
             <div className="flex justify-end gap-2 pt-2">
@@ -1438,6 +1463,92 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
           if (onOpenGroupDetail) onOpenGroupDetail(code);
         }}
       />
+
+      {/* Individual QR Size & DOCX Print Modal */}
+      {showQrPrintModal && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-900/50 p-4 animate-fadeIn">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center">
+                  <QrCode className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-sm text-slate-900">
+                    Параметры печати QR-этикеток (DOCX)
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Выбрано единиц: {selectedIds.length} шт.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowQrPrintModal(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-3">
+              <QrSizeSelector
+                value={qrSizeCm}
+                onChange={setQrSizeCm}
+                showColumnsHint
+              />
+
+              <div className="flex items-center gap-3 pt-2 border-t border-slate-200/80">
+                <div
+                  className="shrink-0 bg-white border border-slate-300 rounded-md flex items-center justify-center shadow-2xs transition-all"
+                  style={{
+                    width: `${Math.max(22, Math.min(72, Math.round(qrSizeCm * 14)))}px`,
+                    height: `${Math.max(22, Math.min(72, Math.round(qrSizeCm * 14)))}px`,
+                  }}
+                >
+                  <QrCode className="w-3/4 h-3/4 text-slate-800" />
+                </div>
+                <div className="text-[11px] text-slate-600 leading-snug">
+                  Физический размер кода на листе A4:{' '}
+                  <strong className="text-slate-900">
+                    {qrSizeCm}×{qrSizeCm} см
+                  </strong>
+                  . Макет автоматически разместит{' '}
+                  <strong className="text-indigo-700">
+                    {getColumnsForQrSize(qrSizeCm)}{' '}
+                    {getColumnsForQrSize(qrSizeCm) === 1
+                      ? 'этикетку'
+                      : 'этикетки'}
+                  </strong>{' '}
+                  в строку.
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowQrPrintModal(false)}
+                disabled={generatingQrDocx}
+                className="px-3.5 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleGenerateQrDocx}
+                disabled={generatingQrDocx}
+                className="px-4 py-2 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-xl inline-flex items-center gap-1.5 shadow-xs"
+              >
+                <FileText className="w-4 h-4" />
+                {generatingQrDocx
+                  ? 'Формирование DOCX...'
+                  : `Скачать DOCX (${qrSizeCm}×${qrSizeCm} см)`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Delete Confirmation Modal */}
       {deleteTarget && (

@@ -6,6 +6,7 @@ import * as XLSX from 'xlsx';
 import { db } from './src/db/index.ts';
 import {
   additionalFields,
+  auditLogs,
   equipment,
   equipmentIssues,
   equipmentTransfers,
@@ -23,12 +24,22 @@ import {
   clearAuthCookies,
   generateAccessToken,
   generateRefreshToken,
+  hashTokenForStorage,
   optionalAuth,
   requireAuth,
   requireRole,
   setAuthCookies,
+  validateLoginFormat,
+  validatePasswordStrength,
+  verifyRefreshJwt,
   type AuthRequest,
 } from './src/server/auth.ts';
+import {
+  ENGINEER_ALLOWED_CATEGORIES,
+  extractClientIp,
+  getRoleLogCapabilities,
+  logAuditEvent,
+} from './src/server/audit-logger.ts';
 import {
   generateQrDocx,
   generateGroupQrDocx,
@@ -43,7 +54,7 @@ import {
   validateAdditionalFields,
 } from './src/server/validation.ts';
 import { seedDatabaseIfEmpty } from './src/db/seed.ts';
-import { and, desc, eq, gte, ilike, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
+import { and, desc, eq, gte, ilike, inArray, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
 import path from 'path';
 
 dotenv.config();
@@ -54,13 +65,147 @@ const isDev = process.env.NODE_ENV !== 'production';
 
 // Trust Render / reverse-proxy headers (X-Forwarded-Proto, X-Forwarded-Host) so req.protocol === 'https'
 app.set('trust proxy', 1);
+app.disable('x-powered-by');
+
+// Security Headers Middleware
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(self), microphone=(), geolocation=()');
+  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
+  const isHttps = req.secure || req.get('x-forwarded-proto') === 'https';
+  if (isHttps) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  if (req.path.startsWith('/api/')) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+  }
+  next();
+});
+
+// In-memory Rate Limiters & Brute-Force Protection
+interface RateEntry {
+  count: number;
+  resetAt: number;
+}
+
+const apiRateStore = new Map<string, RateEntry>();
+const authRateStore = new Map<string, RateEntry>();
+const failedLoginStore = new Map<string, RateEntry>();
+
+// Periodic cleanup of expired rate-limit entries
+setInterval(() => {
+  const now = Date.now();
+  for (const store of [apiRateStore, authRateStore, failedLoginStore]) {
+    for (const [key, entry] of store.entries()) {
+      if (entry.resetAt <= now) {
+        store.delete(key);
+      }
+    }
+  }
+}, 5 * 60 * 1000).unref();
+
+function checkRateLimit(
+  store: Map<string, RateEntry>,
+  key: string,
+  maxRequests: number,
+  windowMs: number
+): { allowed: boolean; retryAfterSec: number } {
+  const now = Date.now();
+  const existing = store.get(key);
+  if (!existing || existing.resetAt <= now) {
+    store.set(key, { count: 1, resetAt: now + windowMs });
+    return { allowed: true, retryAfterSec: 0 };
+  }
+  if (existing.count >= maxRequests) {
+    return {
+      allowed: false,
+      retryAfterSec: Math.max(1, Math.ceil((existing.resetAt - now) / 1000)),
+    };
+  }
+  existing.count += 1;
+  return { allowed: true, retryAfterSec: 0 };
+}
+
+function recordFailedLoginAttempt(key: string): { locked: boolean; attempts: number } {
+  const now = Date.now();
+  const windowMs = 15 * 60 * 1000;
+  const existing = failedLoginStore.get(key);
+  if (!existing || existing.resetAt <= now) {
+    failedLoginStore.set(key, { count: 1, resetAt: now + windowMs });
+    return { locked: false, attempts: 1 };
+  }
+  existing.count += 1;
+  return { locked: existing.count >= 5, attempts: existing.count };
+}
+
+function isLoginBruteforceLocked(key: string): { locked: boolean; retryAfterMin: number } {
+  const now = Date.now();
+  const existing = failedLoginStore.get(key);
+  if (!existing || existing.resetAt <= now) return { locked: false, retryAfterMin: 0 };
+  if (existing.count >= 5) {
+    return {
+      locked: true,
+      retryAfterMin: Math.max(1, Math.ceil((existing.resetAt - now) / 60000)),
+    };
+  }
+  return { locked: false, retryAfterMin: 0 };
+}
+
+function sanitizeSpreadsheetCell(val: any): string {
+  const str = val === null || val === undefined ? '' : String(val);
+  if (/^[=+\-@\t\r]/.test(str)) {
+    return `'${str}`;
+  }
+  return str;
+}
+
+// Global API rate limit (400 requests/min per IP)
+app.use('/api', (req, res, next) => {
+  const ip = extractClientIp(req) || 'unknown';
+  const check = checkRateLimit(apiRateStore, ip, 400, 60 * 1000);
+  if (!check.allowed) {
+    return res.status(429).json({
+      error: `Превышен лимит запросов. Повторите попытку через ${check.retryAfterSec} сек.`,
+    });
+  }
+  next();
+});
+
+// CSRF / Cross-Origin protection on state-changing API requests
+app.use('/api', (req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    return next();
+  }
+  const origin = req.get('origin');
+  if (origin) {
+    try {
+      const originHost = new URL(origin).host.toLowerCase();
+      const requestHost = (req.get('x-forwarded-host') || req.get('host') || '').toLowerCase();
+      const appUrlHost = process.env.APP_URL
+        ? new URL(process.env.APP_URL).host.toLowerCase()
+        : '';
+      const allowedHosts = new Set([requestHost, appUrlHost].filter(Boolean));
+      if (allowedHosts.size > 0 && !allowedHosts.has(originHost)) {
+        return res.status(403).json({
+          error: 'Запрос отклонён политикой безопасности источника (CSRF Origin check)',
+        });
+      }
+    } catch {
+      return res.status(403).json({ error: 'Некорректный заголовок Origin' });
+    }
+  }
+  next();
+});
 
 app.use(express.json({ limit: '15mb' }));
 app.use(express.urlencoded({ extended: true, limit: '15mb' }));
 app.use(cookieParser());
 
 function getPublicBaseUrl(req: express.Request): string {
-  const host = req.get('host');
+  const host = req.get('x-forwarded-host') || req.get('host');
   if (host) {
     return `${req.protocol}://${host}`;
   }
@@ -82,45 +227,90 @@ app.get('/api/health', async (_req, res) => {
 // 1. AUTHENTICATION & USER MANAGEMENT ROUTES
 // ==========================================
 
+// Rate limiter for auth endpoints (40 requests per 15 min per IP)
+app.use('/api/auth', (req, res, next) => {
+  if (req.path === '/me') return next();
+  const ip = extractClientIp(req) || 'unknown';
+  const check = checkRateLimit(authRateStore, ip, 40, 15 * 60 * 1000);
+  if (!check.allowed) {
+    return res.status(429).json({
+      error: `Слишком много запросов авторизации. Повторите через ${Math.ceil(
+        check.retryAfterSec / 60
+      )} мин.`,
+    });
+  }
+  next();
+});
+
 // Login
 app.post('/api/auth/login', async (req, res) => {
   try {
-    const { login, password } = req.body;
-    if (!login || !password) {
+    const rawLogin = typeof req.body?.login === 'string' ? req.body.login.trim() : '';
+    const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (!rawLogin || !rawPassword) {
       return res.status(400).json({ error: 'Логин и пароль обязательны' });
+    }
+
+    const clientIp = extractClientIp(req) || 'unknown';
+    const bruteKey = `${clientIp}::${rawLogin.toLowerCase()}`;
+    const lockState = isLoginBruteforceLocked(bruteKey);
+    if (lockState.locked) {
+      await logAuditEvent({
+        req,
+        actor: { login: rawLogin, role: 'ANONYMOUS' },
+        action: 'AUTH_BRUTEFORCE_BLOCKED',
+        category: 'SECURITY',
+        severity: 'CRITICAL',
+        entityType: 'auth',
+        summary: `Вход временно заблокирован из-за превышения числа неудачных попыток для «${rawLogin}»`,
+        details: { attemptedLogin: rawLogin, retryAfterMin: lockState.retryAfterMin },
+      });
+      return res.status(429).json({
+        error: `Слишком много неудачных попыток входа. Повторите через ${lockState.retryAfterMin} мин.`,
+      });
     }
 
     const [foundUser] = await db
       .select()
       .from(users)
-      .where(eq(users.login, login))
+      .where(eq(users.login, rawLogin))
       .limit(1);
 
     if (!foundUser) {
+      recordFailedLoginAttempt(bruteKey);
+      await logAuditEvent({
+        req,
+        actor: { login: rawLogin, role: 'ANONYMOUS' },
+        action: 'AUTH_LOGIN_FAILED',
+        category: 'SECURITY',
+        severity: 'WARNING',
+        entityType: 'auth',
+        summary: `Неудачная попытка входа для несуществующего логина «${rawLogin}»`,
+        details: { attemptedLogin: rawLogin, reason: 'user_not_found' },
+      });
       return res.status(401).json({ error: 'Неверный логин или пароль' });
     }
 
-    let passwordMatch = await bcrypt.compare(password, foundUser.password_hash);
+    const passwordMatch = await bcrypt.compare(rawPassword, foundUser.password_hash);
     if (!passwordMatch) {
-      const defaultCredentials: Record<string, string> = {
-        admin: 'admin123',
-        engineer: 'engineer123',
-        user: 'user123',
-      };
-      if (defaultCredentials[login] && defaultCredentials[login] === password) {
-        console.log(`Auto-healing password hash for user ${login}...`);
-        const freshHash = await bcrypt.hash(password, 10);
-        await db
-          .update(users)
-          .set({ password_hash: freshHash })
-          .where(eq(users.id, foundUser.id));
-        passwordMatch = true;
-      }
-    }
-
-    if (!passwordMatch) {
+      const failRes = recordFailedLoginAttempt(bruteKey);
+      await logAuditEvent({
+        req,
+        actor: { id: foundUser.id, login: foundUser.login, role: foundUser.role },
+        action: 'AUTH_LOGIN_FAILED',
+        category: 'SECURITY',
+        severity: failRes.locked ? 'CRITICAL' : 'WARNING',
+        entityType: 'user',
+        entityId: foundUser.id,
+        entityLabel: foundUser.login,
+        summary: `Неудачная попытка входа (неверный пароль) для «${foundUser.login}» (попытка ${failRes.attempts}/5)`,
+        details: { reason: 'invalid_password', attempts: failRes.attempts },
+      });
       return res.status(401).json({ error: 'Неверный логин или пароль' });
     }
+
+    // Clear failed login counter on successful authentication
+    failedLoginStore.delete(bruteKey);
 
     const userPayload = {
       id: foundUser.id,
@@ -130,28 +320,40 @@ app.post('/api/auth/login', async (req, res) => {
 
     const accessToken = generateAccessToken(userPayload);
     const refreshToken = generateRefreshToken(userPayload);
+    const hashedRefresh = hashTokenForStorage(refreshToken);
 
-    // Refresh token valid for 10 days
+    // Refresh token valid for 10 days (stored as SHA-256 hash in DB)
     const validUntil = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000);
 
-    // Upsert refresh token into DB for user
     await db
       .insert(refreshTokens)
       .values({
         id: foundUser.id,
-        token: refreshToken,
+        token: hashedRefresh,
         valid_until: validUntil,
       })
       .onConflictDoUpdate({
         target: refreshTokens.id,
         set: {
-          token: refreshToken,
+          token: hashedRefresh,
           valid_until: validUntil,
           created_at: new Date(),
         },
       });
 
-    setAuthCookies(res, accessToken, refreshToken);
+    setAuthCookies(res, accessToken, refreshToken, req);
+
+    await logAuditEvent({
+      req,
+      actor: userPayload,
+      action: 'AUTH_LOGIN',
+      category: 'AUTH',
+      severity: 'INFO',
+      entityType: 'user',
+      entityId: foundUser.id,
+      entityLabel: foundUser.login,
+      summary: `Успешный вход в систему («${foundUser.login}», роль ${foundUser.role})`,
+    });
 
     res.json({
       success: true,
@@ -165,32 +367,38 @@ app.post('/api/auth/login', async (req, res) => {
 });
 
 // Refresh token
-// Spec: "Невалидные refresh-токены должны удаляться из базы данных при попытке получить/обновить refresh-токен."
 app.post('/api/auth/refresh', async (req, res) => {
   try {
-    let token = req.cookies?.refresh_token || req.body?.refreshToken;
+    const token = req.cookies?.refresh_token;
 
-    if (!token) {
+    if (!token || typeof token !== 'string') {
       return res.status(401).json({ error: 'Отсутствует refresh-токен' });
     }
 
-    // Find token in DB
+    const decoded = verifyRefreshJwt(token);
+    if (!decoded) {
+      clearAuthCookies(res, req);
+      return res.status(401).json({ error: 'Недействительный refresh-токен' });
+    }
+
+    const hashedToken = hashTokenForStorage(token);
+
+    // Find hashed token in DB
     const [storedToken] = await db
       .select()
       .from(refreshTokens)
-      .where(eq(refreshTokens.token, token))
+      .where(eq(refreshTokens.token, hashedToken))
       .limit(1);
 
     if (!storedToken) {
-      clearAuthCookies(res);
-      return res.status(401).json({ error: 'Недействительный refresh-токен' });
+      clearAuthCookies(res, req);
+      return res.status(401).json({ error: 'Сессия была завершена или отозвана' });
     }
 
     // Check expiration
     if (new Date(storedToken.valid_until) < new Date()) {
-      // Delete invalid expired token from DB
       await db.delete(refreshTokens).where(eq(refreshTokens.id, storedToken.id));
-      clearAuthCookies(res);
+      clearAuthCookies(res, req);
       return res.status(401).json({ error: 'Срок действия refresh-токена истек' });
     }
 
@@ -202,7 +410,7 @@ app.post('/api/auth/refresh', async (req, res) => {
 
     if (!user) {
       await db.delete(refreshTokens).where(eq(refreshTokens.id, storedToken.id));
-      clearAuthCookies(res);
+      clearAuthCookies(res, req);
       return res.status(401).json({ error: 'Пользователь не найден' });
     }
 
@@ -214,18 +422,19 @@ app.post('/api/auth/refresh', async (req, res) => {
 
     const newAccessToken = generateAccessToken(userPayload);
     const newRefreshToken = generateRefreshToken(userPayload);
+    const newHashedRefresh = hashTokenForStorage(newRefreshToken);
     const validUntil = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000);
 
     await db
       .update(refreshTokens)
       .set({
-        token: newRefreshToken,
+        token: newHashedRefresh,
         valid_until: validUntil,
         created_at: new Date(),
       })
       .where(eq(refreshTokens.id, user.id));
 
-    setAuthCookies(res, newAccessToken, newRefreshToken);
+    setAuthCookies(res, newAccessToken, newRefreshToken, req);
 
     res.json({
       success: true,
@@ -238,13 +447,119 @@ app.post('/api/auth/refresh', async (req, res) => {
   }
 });
 
+// Change own password (Authenticated user)
+app.post('/api/auth/change-password', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const userId = req.user!.id;
+    const currentPassword =
+      typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : '';
+    const newPassword =
+      typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Укажите текущий и новый пароли' });
+    }
+    if (currentPassword === newPassword) {
+      return res.status(400).json({ error: 'Новый пароль должен отличаться от текущего' });
+    }
+
+    const [foundUser] = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+
+    if (!foundUser) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    const matches = await bcrypt.compare(currentPassword, foundUser.password_hash);
+    if (!matches) {
+      await logAuditEvent({
+        req,
+        action: 'AUTH_PASSWORD_CHANGE_FAILED',
+        category: 'SECURITY',
+        severity: 'WARNING',
+        entityType: 'user',
+        entityId: foundUser.id,
+        entityLabel: foundUser.login,
+        summary: `Неудачная попытка смены пароля (неверный текущий пароль) для «${foundUser.login}»`,
+      });
+      return res.status(400).json({ error: 'Текущий пароль указан неверно' });
+    }
+
+    const strengthError = validatePasswordStrength(newPassword, foundUser.login);
+    if (strengthError) {
+      return res.status(400).json({ error: strengthError });
+    }
+
+    const newHash = await bcrypt.hash(newPassword, 12);
+    await db
+      .update(users)
+      .set({ password_hash: newHash })
+      .where(eq(users.id, userId));
+
+    // Rotate session tokens on password change
+    const userPayload = {
+      id: foundUser.id,
+      login: foundUser.login,
+      role: foundUser.role as 'ADMIN' | 'ENGINEER' | 'USER',
+    };
+    const accessToken = generateAccessToken(userPayload);
+    const refreshToken = generateRefreshToken(userPayload);
+    const hashedRefresh = hashTokenForStorage(refreshToken);
+    const validUntil = new Date(Date.now() + 10 * 24 * 60 * 60 * 1000);
+
+    await db
+      .insert(refreshTokens)
+      .values({ id: foundUser.id, token: hashedRefresh, valid_until: validUntil })
+      .onConflictDoUpdate({
+        target: refreshTokens.id,
+        set: { token: hashedRefresh, valid_until: validUntil, created_at: new Date() },
+      });
+
+    setAuthCookies(res, accessToken, refreshToken, req);
+
+    await logAuditEvent({
+      req,
+      action: 'AUTH_PASSWORD_CHANGE',
+      category: 'SECURITY',
+      severity: 'WARNING',
+      entityType: 'user',
+      entityId: foundUser.id,
+      entityLabel: foundUser.login,
+      summary: `Пользователь «${foundUser.login}» изменил свой пароль`,
+    });
+
+    res.json({
+      success: true,
+      accessToken,
+      message: 'Пароль успешно обновлён',
+    });
+  } catch (error: any) {
+    console.error('Change password error:', error);
+    res.status(500).json({ error: 'Ошибка сервера при смене пароля' });
+  }
+});
+
 // Logout
 app.post('/api/auth/logout', optionalAuth, async (req: AuthRequest, res) => {
   try {
     if (req.user) {
       await db.delete(refreshTokens).where(eq(refreshTokens.id, req.user.id));
+      await logAuditEvent({
+        req,
+        actor: req.user,
+        action: 'AUTH_LOGOUT',
+        category: 'AUTH',
+        severity: 'INFO',
+        entityType: 'user',
+        entityId: req.user.id,
+        entityLabel: req.user.login,
+        summary: `Выход из системы («${req.user.login}»)`,
+      });
     }
-    clearAuthCookies(res);
+    clearAuthCookies(res, req);
     res.json({ success: true });
   } catch (error) {
     console.error('Logout error:', error);
@@ -273,44 +588,166 @@ app.get('/api/users', requireAuth, requireRole('ADMIN'), async (_req, res) => {
       .orderBy(users.id);
     res.json(allUsers);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error('Fetch users error:', error);
+    res.status(500).json({ error: 'Ошибка загрузки списка пользователей' });
   }
 });
 
-// Create User (Admin only, Scenario 1 page 1)
+// Create User (Admin only)
 app.post('/api/users', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
-    const { login, password, role } = req.body;
-    if (!login || !password || !role) {
+    const rawLogin = typeof req.body?.login === 'string' ? req.body.login.trim() : '';
+    const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
+    const role = req.body?.role;
+    if (!rawLogin || !rawPassword || !role) {
       return res.status(400).json({ error: 'Логин, пароль и роль обязательны' });
     }
     if (!['ADMIN', 'ENGINEER', 'USER'].includes(role)) {
       return res.status(400).json({ error: 'Недопустимая роль пользователя' });
     }
 
+    const loginError = validateLoginFormat(rawLogin);
+    if (loginError) {
+      return res.status(400).json({ error: loginError });
+    }
+
+    const passError = validatePasswordStrength(rawPassword, rawLogin);
+    if (passError) {
+      return res.status(400).json({ error: passError });
+    }
+
     const existing = await db
-      .select()
+      .select({ id: users.id })
       .from(users)
-      .where(eq(users.login, login))
+      .where(eq(users.login, rawLogin))
       .limit(1);
 
     if (existing.length > 0) {
-      return res.status(400).json({ error: `Пользователь с логином "${login}" уже существует` });
+      return res.status(400).json({ error: `Пользователь с логином "${rawLogin}" уже существует` });
     }
 
-    const passwordHash = await bcrypt.hash(password, 10);
+    const passwordHash = await bcrypt.hash(rawPassword, 12);
     const [created] = await db
       .insert(users)
       .values({
-        login,
+        login: rawLogin,
         password_hash: passwordHash,
         role: role as 'ADMIN' | 'ENGINEER' | 'USER',
       })
       .returning({ id: users.id, login: users.login, role: users.role });
 
+    await logAuditEvent({
+      req,
+      action: 'USER_CREATE',
+      category: 'ADMIN',
+      severity: 'WARNING',
+      entityType: 'user',
+      entityId: created.id,
+      entityLabel: created.login,
+      summary: `Создана учётная запись «${created.login}» с ролью ${created.role}`,
+      details: { userId: created.id, login: created.login, role: created.role },
+    });
+
     res.status(201).json(created);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    console.error('Create user error:', error);
+    res.status(500).json({ error: 'Ошибка создания пользователя' });
+  }
+});
+
+// Admin reset password for a user
+app.put('/api/users/:id/password', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res) => {
+  try {
+    const targetId = Number(req.params.id);
+    if (!Number.isInteger(targetId) || targetId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID пользователя' });
+    }
+
+    const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+    const [targetUser] = await db
+      .select({ id: users.id, login: users.login, role: users.role })
+      .from(users)
+      .where(eq(users.id, targetId))
+      .limit(1);
+
+    if (!targetUser) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    const passError = validatePasswordStrength(newPassword, targetUser.login);
+    if (passError) {
+      return res.status(400).json({ error: passError });
+    }
+
+    const newHash = await bcrypt.hash(newPassword, 12);
+    await db
+      .update(users)
+      .set({ password_hash: newHash })
+      .where(eq(users.id, targetId));
+
+    // Revoke active refresh token so target user must re-authenticate with new password
+    await db.delete(refreshTokens).where(eq(refreshTokens.id, targetId));
+
+    await logAuditEvent({
+      req,
+      action: 'USER_PASSWORD_RESET',
+      category: 'SECURITY',
+      severity: 'WARNING',
+      entityType: 'user',
+      entityId: targetUser.id,
+      entityLabel: targetUser.login,
+      summary: `Администратор сбросил пароль пользователя «${targetUser.login}»`,
+      details: { targetUserId: targetUser.id, targetLogin: targetUser.login },
+    });
+
+    res.json({ success: true, message: `Пароль для «${targetUser.login}» обновлён` });
+  } catch (error: any) {
+    console.error('Reset user password error:', error);
+    res.status(500).json({ error: 'Ошибка сброса пароля' });
+  }
+});
+
+// Delete user (Admin only, cannot delete own account)
+app.delete('/api/users/:id', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res) => {
+  try {
+    const targetId = Number(req.params.id);
+    if (!Number.isInteger(targetId) || targetId <= 0) {
+      return res.status(400).json({ error: 'Некорректный ID пользователя' });
+    }
+    if (targetId === req.user!.id) {
+      return res.status(400).json({ error: 'Нельзя удалить собственную учётную запись администратора' });
+    }
+
+    const [targetUser] = await db
+      .select({ id: users.id, login: users.login, role: users.role })
+      .from(users)
+      .where(eq(users.id, targetId))
+      .limit(1);
+
+    if (!targetUser) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    await db.delete(refreshTokens).where(eq(refreshTokens.id, targetId));
+    await db.delete(notifications).where(eq(notifications.user_id, targetId));
+    await db.delete(users).where(eq(users.id, targetId));
+
+    await logAuditEvent({
+      req,
+      action: 'USER_DELETE',
+      category: 'SECURITY',
+      severity: 'CRITICAL',
+      entityType: 'user',
+      entityId: targetUser.id,
+      entityLabel: targetUser.login,
+      summary: `Удалена учётная запись «${targetUser.login}» (роль ${targetUser.role})`,
+      details: { deletedUserId: targetUser.id, deletedLogin: targetUser.login, deletedRole: targetUser.role },
+    });
+
+    res.json({ success: true, deletedId: targetId });
+  } catch (error: any) {
+    console.error('Delete user error:', error);
+    res.status(500).json({ error: 'Ошибка удаления пользователя (возможно, есть связанные инвентаризации)' });
   }
 });
 
@@ -319,7 +756,7 @@ app.post('/api/users', requireAuth, requireRole('ADMIN'), async (req, res) => {
 // ==========================================
 
 // Get Rooms
-app.get('/api/rooms', optionalAuth, async (_req, res) => {
+app.get('/api/rooms', requireAuth, async (_req, res) => {
   try {
     const roomList = await db.select().from(rooms).orderBy(rooms.number);
     res.json(roomList);
@@ -344,6 +781,18 @@ app.post('/api/rooms', requireAuth, requireRole('ADMIN'), async (req, res) => {
       })
       .returning();
 
+    await logAuditEvent({
+      req,
+      action: 'ROOM_CREATE',
+      category: 'ADMIN',
+      severity: 'INFO',
+      entityType: 'room',
+      entityId: newRoom.id,
+      entityLabel: `Ауд. ${newRoom.number} (${newRoom.floor} этаж)`,
+      summary: `Добавлено помещение «${newRoom.number}» (${newRoom.floor} этаж)`,
+      details: { roomId: newRoom.id, number: newRoom.number, floor: newRoom.floor },
+    });
+
     res.status(201).json(newRoom);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -351,7 +800,7 @@ app.post('/api/rooms', requireAuth, requireRole('ADMIN'), async (req, res) => {
 });
 
 // Get Equipment Types (hierarchical)
-app.get('/api/equipment-types', optionalAuth, async (_req, res) => {
+app.get('/api/equipment-types', requireAuth, async (_req, res) => {
   try {
     const types = await db.select().from(equipmentTypes).orderBy(equipmentTypes.name);
     res.json(types);
@@ -376,6 +825,18 @@ app.post('/api/equipment-types', requireAuth, requireRole('ADMIN'), async (req, 
       })
       .returning();
 
+    await logAuditEvent({
+      req,
+      action: 'TYPE_CREATE',
+      category: 'ADMIN',
+      severity: 'INFO',
+      entityType: 'equipment_type',
+      entityId: newType.id,
+      entityLabel: newType.name,
+      summary: `Создан тип оборудования «${newType.name}»`,
+      details: { parent_id: newType.parent_id },
+    });
+
     res.status(201).json(newType);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -386,6 +847,9 @@ app.post('/api/equipment-types', requireAuth, requireRole('ADMIN'), async (req, 
 app.put('/api/equipment-types/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
     const typeId = Number(req.params.id);
+    if (!Number.isInteger(typeId) || typeId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор типа оборудования' });
+    }
     const { name, parent_id } = req.body;
 
     if (!name || !name.trim()) {
@@ -406,6 +870,10 @@ app.put('/api/equipment-types/:id', requireAuth, requireRole('ADMIN'), async (re
       parent_id !== undefined && parent_id !== '' && parent_id !== null
         ? Number(parent_id)
         : null;
+
+    if (newParentId !== null && (!Number.isInteger(newParentId) || newParentId <= 0)) {
+      return res.status(400).json({ error: 'Некорректный идентификатор родительского типа' });
+    }
 
     if (newParentId === typeId) {
       return res.status(400).json({ error: 'Тип не может быть родителем самого себя' });
@@ -447,6 +915,9 @@ app.put('/api/equipment-types/:id', requireAuth, requireRole('ADMIN'), async (re
 app.delete('/api/equipment-types/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
     const typeId = Number(req.params.id);
+    if (!Number.isInteger(typeId) || typeId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор типа оборудования' });
+    }
 
     const [existing] = await db
       .select()
@@ -495,9 +966,12 @@ app.delete('/api/equipment-types/:id', requireAuth, requireRole('ADMIN'), async 
 });
 
 // Get Additional Fields for a type (including inherited from parents)
-app.get('/api/equipment-types/:id/fields', optionalAuth, async (req, res) => {
+app.get('/api/equipment-types/:id/fields', requireAuth, async (req, res) => {
   try {
     const typeId = Number(req.params.id);
+    if (!Number.isInteger(typeId) || typeId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор типа оборудования' });
+    }
     const fields = await getAllAdditionalFieldsForType(typeId);
     res.json(fields);
   } catch (error: any) {
@@ -510,6 +984,9 @@ app.get('/api/equipment-types/:id/fields', optionalAuth, async (req, res) => {
 app.post('/api/equipment-types/:id/fields', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
     const typeId = Number(req.params.id);
+    if (!Number.isInteger(typeId) || typeId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор типа оборудования' });
+    }
     const { code, title, data_type, is_required, is_multiple, options } = req.body;
 
     if (!code || !title || !data_type) {
@@ -563,6 +1040,9 @@ app.put('/api/equipment-types/:typeId/fields/:fieldId', requireAuth, requireRole
   try {
     const typeId = Number(req.params.typeId);
     const fieldId = Number(req.params.fieldId);
+    if (!Number.isInteger(typeId) || typeId <= 0 || !Number.isInteger(fieldId) || fieldId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор типа или характеристики' });
+    }
     const { code, title, data_type, is_required, is_multiple, options } = req.body;
 
     if (!code || !title || !data_type) {
@@ -629,6 +1109,9 @@ app.put('/api/equipment-types/:typeId/fields/:fieldId', requireAuth, requireRole
 app.delete('/api/equipment-types/:typeId/fields/:fieldId', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
     const fieldId = Number(req.params.fieldId);
+    if (!Number.isInteger(fieldId) || fieldId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор характеристики' });
+    }
     await db
       .update(additionalFields)
       .set({ is_active: false })
@@ -737,9 +1220,10 @@ function computeDynamicWarranty(fields: any = {}) {
   };
 }
 
-// Equipment List
-app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
+// Equipment List (strictly authenticated + USER role privacy filter)
+app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
   try {
+    const isRegularUser = req.user?.role === 'USER';
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 15));
     const offset = (page - 1) * limit;
@@ -749,11 +1233,11 @@ app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
     const roomId = req.query.room_id ? Number(req.query.room_id) : undefined;
     const receivedFrom = req.query.received_from ? new Date(String(req.query.received_from)) : undefined;
     const receivedTo = req.query.received_to ? new Date(String(req.query.received_to)) : undefined;
-    const includeWrittenOff = req.query.include_written_off === 'true';
-    const writeoffState = req.query.writeoff_state ? String(req.query.writeoff_state) : undefined;
+    const includeWrittenOff = !isRegularUser && req.query.include_written_off === 'true';
+    const writeoffState = !isRegularUser && req.query.writeoff_state ? String(req.query.writeoff_state) : undefined;
     const hasUnrepairedIssue = req.query.has_unrepaired_issue === 'true';
-    const activeTransferOnly = req.query.active_transfer === 'true';
-    const transferredTo = req.query.transferred_to ? String(req.query.transferred_to).trim() : undefined;
+    const activeTransferOnly = !isRegularUser && req.query.active_transfer === 'true';
+    const transferredTo = !isRegularUser && req.query.transferred_to ? String(req.query.transferred_to).trim() : undefined;
     const customFieldCode = req.query.custom_field_code ? String(req.query.custom_field_code).trim() : undefined;
     const customFieldValue = req.query.custom_field_value ? String(req.query.custom_field_value).trim() : undefined;
 
@@ -799,21 +1283,52 @@ app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
 
     const conditions: any[] = [];
 
-    // Search filter across name, inventory number
+    // Search filter across name, inventory number, and DB ID
     if (search) {
-      conditions.push(
-        or(
-          ilike(equipment.name, `%${search}%`),
-          ilike(equipment.inventory_number, `%${search}%`)
-        )
-      );
+      const cleanIdStr = search.trim().replace(/^#/, '');
+      const parsedSearchId = /^\d+$/.test(cleanIdStr) ? Number(cleanIdStr) : null;
+      const searchConds: any[] = [
+        ilike(equipment.name, `%${search}%`),
+        ilike(equipment.inventory_number, `%${search}%`),
+      ];
+      if (parsedSearchId && Number.isSafeInteger(parsedSearchId) && parsedSearchId > 0) {
+        searchConds.push(eq(equipment.id, parsedSearchId));
+      }
+      conditions.push(or(...searchConds));
     }
 
-    if (typeId) {
-      conditions.push(eq(equipment.type_id, typeId));
+    if (typeId && Number.isInteger(typeId) && typeId > 0) {
+      const allTypes = await db
+        .select({ id: equipmentTypes.id, parent_id: equipmentTypes.parent_id })
+        .from(equipmentTypes);
+
+      const childrenByParent = new Map<number, number[]>();
+      for (const t of allTypes) {
+        if (t.parent_id !== null && t.parent_id !== undefined) {
+          const pId = Number(t.parent_id);
+          const list = childrenByParent.get(pId) || [];
+          list.push(Number(t.id));
+          childrenByParent.set(pId, list);
+        }
+      }
+
+      const targetTypeIds = new Set<number>([typeId]);
+      const queue = [typeId];
+      while (queue.length > 0) {
+        const current = queue.shift()!;
+        const children = childrenByParent.get(current) || [];
+        for (const childId of children) {
+          if (!targetTypeIds.has(childId)) {
+            targetTypeIds.add(childId);
+            queue.push(childId);
+          }
+        }
+      }
+
+      conditions.push(inArray(equipment.type_id, Array.from(targetTypeIds)));
     }
 
-    if (roomId) {
+    if (roomId && Number.isInteger(roomId) && roomId > 0) {
       conditions.push(eq(equipment.room_id, roomId));
     }
 
@@ -851,7 +1366,9 @@ app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
 
     if (search) {
       const q = search.toLowerCase();
+      const qId = q.replace(/^#/, '');
       filtered = filtered.filter((item: any) => {
+        if (String(item.id) === qId) return true;
         if (item.name?.toLowerCase().includes(q)) return true;
         if (item.inventory_number?.toLowerCase().includes(q)) return true;
         if (item.additional_fields?.description?.toLowerCase().includes(q)) return true;
@@ -992,7 +1509,14 @@ app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
     }
 
     const total = filtered.length;
-    const paginatedItems = filtered.slice(offset, offset + limit);
+    const paginatedItems = filtered.slice(offset, offset + limit).map((item: any) => {
+      if (!isRegularUser) return item;
+      return {
+        ...item,
+        writeoffState: null,
+        writeoffDate: null,
+      };
+    });
 
     res.json({
       items: paginatedItems,
@@ -1003,13 +1527,13 @@ app.get('/api/equipment', optionalAuth, async (req: AuthRequest, res) => {
     });
   } catch (error: any) {
     console.error('Fetch equipment error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: 'Ошибка загрузки списка оборудования' });
   }
 });
 
 // Download Department Excel Template matching accountant specification
 // Must be registered BEFORE /api/equipment/:id so Express doesn't treat 'excel-template' as :id
-app.get('/api/equipment/excel-template', (_req, res) => {
+app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
   try {
     const headers = [
       'Инвентарный номер',
@@ -1037,8 +1561,8 @@ app.get('/api/equipment/excel-template', (_req, res) => {
         'Инвентарный номер': 'INV-2019-011',
         'Наименование': 'Лазерный принтер HP LJ 1020 белый',
         'Дата принятия к учету': '2019-04-12',
-        'Первоначальная стоимость': 28500,
-        'Остаточная стоимость': 6500,
+        'Первоначальная стоимость': 650.0,
+        'Остаточная стоимость': 185.0,
         'Помещение': '305',
         'Место': 'Стол секретаря',
         'Размеры (Д*Ш*В), см': '',
@@ -1057,8 +1581,8 @@ app.get('/api/equipment/excel-template', (_req, res) => {
         'Инвентарный номер': 'INV-2021-045',
         'Наименование': 'Центральный стол на 12 мест',
         'Дата принятия к учету': '2021-08-20',
-        'Первоначальная стоимость': 145000,
-        'Остаточная стоимость': 98000,
+        'Первоначальная стоимость': 1850.0,
+        'Остаточная стоимость': 1200.0,
         'Помещение': '302',
         'Место': 'Центральный стол на 12 мест',
         'Размеры (Д*Ш*В), см': '560*200*140',
@@ -1077,8 +1601,8 @@ app.get('/api/equipment/excel-template', (_req, res) => {
         'Инвентарный номер': 'INV-2020-032',
         'Наименование': 'Шкаф 3',
         'Дата принятия к учету': '2020-11-15',
-        'Первоначальная стоимость': 82000,
-        'Остаточная стоимость': 49000,
+        'Первоначальная стоимость': 980.0,
+        'Остаточная стоимость': 590.0,
         'Помещение': '302',
         'Место': 'Шкаф 3',
         'Размеры (Д*Ш*В), см': '420*80*250',
@@ -1097,8 +1621,8 @@ app.get('/api/equipment/excel-template', (_req, res) => {
         'Инвентарный номер': 'INV-2024-007',
         'Наименование': 'Компьютер преподавателя HP ProDesk',
         'Дата принятия к учету': '2024-05-12',
-        'Первоначальная стоимость': 76000,
-        'Остаточная стоимость': 65000,
+        'Первоначальная стоимость': 2450.0,
+        'Остаточная стоимость': 2100.0,
         'Помещение': '309',
         'Место': 'Стол 7',
         'Размеры (Д*Ш*В), см': '',
@@ -1117,8 +1641,8 @@ app.get('/api/equipment/excel-template', (_req, res) => {
         'Инвентарный номер': 'INV-2020-071',
         'Наименование': 'Монитор рабочего места',
         'Дата принятия к учету': '2020-03-10',
-        'Первоначальная стоимость': 16500,
-        'Остаточная стоимость': 6200,
+        'Первоначальная стоимость': 420.0,
+        'Остаточная стоимость': 160.0,
         'Помещение': '309',
         'Место': 'Стол 7',
         'Размеры (Д*Ш*В), см': '',
@@ -1137,8 +1661,8 @@ app.get('/api/equipment/excel-template', (_req, res) => {
         'Инвентарный номер': 'INV-2022-194',
         'Наименование': 'Кресло офисное подъёмно-поворотное',
         'Дата принятия к учету': '2022-09-18',
-        'Первоначальная стоимость': 9800,
-        'Остаточная стоимость': 5400,
+        'Первоначальная стоимость': 290.0,
+        'Остаточная стоимость': 165.0,
         'Помещение': '305',
         'Место': 'Стол 10',
         'Размеры (Д*Ш*В), см': '',
@@ -1172,6 +1696,95 @@ app.get('/api/equipment/excel-template', (_req, res) => {
   } catch (error: any) {
     console.error('Error generating Excel template:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Resolve scanned QR URL / code / inventory number / ID directly on server (without 200-item client cap)
+// Must be registered BEFORE /api/equipment/:id
+app.get('/api/equipment/resolve/:code', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    let rawCode = String(req.params.code || '').trim();
+    if (!rawCode) {
+      return res.status(400).json({ error: 'Укажите код или инвентарный номер' });
+    }
+
+    if (rawCode.includes('/q/')) {
+      rawCode = rawCode.split('/q/').pop()!.split('?')[0].split('#')[0].trim();
+    } else if (rawCode.includes('openEquipment=')) {
+      const m = rawCode.match(/openEquipment=(\d+)/i);
+      if (m) rawCode = m[1];
+    } else if (rawCode.includes('openGroup=')) {
+      const m = rawCode.match(/openGroup=([^&#]+)/i);
+      if (m) rawCode = decodeURIComponent(m[1]).trim();
+    }
+
+    if (!rawCode) {
+      return res.status(400).json({ error: 'Не удалось распознать код оборудования' });
+    }
+
+    if (/^(GRP|BATCH)-/i.test(rawCode)) {
+      const [batch] = await db
+        .select({ code: equipmentBatches.code, name: equipmentBatches.name })
+        .from(equipmentBatches)
+        .where(or(eq(equipmentBatches.code, rawCode), ilike(equipmentBatches.code, rawCode)))
+        .limit(1);
+
+      if (batch) {
+        return res.json({ kind: 'group', code: batch.code, name: batch.name });
+      }
+      return res.status(404).json({ error: `Партия оборудования «${rawCode}» не найдена` });
+    }
+
+    let cleanId = rawCode.replace(/^#/, '');
+    if (/^EQ-\d+$/i.test(cleanId)) {
+      cleanId = cleanId.replace(/^EQ-/i, '');
+    }
+
+    if (/^\d+$/.test(cleanId)) {
+      const numericId = Number(cleanId);
+      if (Number.isSafeInteger(numericId) && numericId > 0) {
+        const [itemById] = await db
+          .select({ id: equipment.id, name: equipment.name, inventory_number: equipment.inventory_number })
+          .from(equipment)
+          .where(eq(equipment.id, numericId))
+          .limit(1);
+
+        if (itemById) {
+          return res.json({
+            kind: 'equipment',
+            id: itemById.id,
+            name: itemById.name,
+            inventory_number: itemById.inventory_number,
+          });
+        }
+      }
+    }
+
+    const [itemByInv] = await db
+      .select({ id: equipment.id, name: equipment.name, inventory_number: equipment.inventory_number })
+      .from(equipment)
+      .where(
+        or(
+          eq(equipment.inventory_number, rawCode),
+          eq(equipment.inventory_number, cleanId),
+          ilike(equipment.inventory_number, rawCode)
+        )
+      )
+      .limit(1);
+
+    if (itemByInv) {
+      return res.json({
+        kind: 'equipment',
+        id: itemByInv.id,
+        name: itemByInv.name,
+        inventory_number: itemByInv.inventory_number,
+      });
+    }
+
+    return res.status(404).json({ error: `Объект «${rawCode}» не найден в базе данных кафедры` });
+  } catch (error: any) {
+    console.error('Resolve QR code error:', error);
+    res.status(500).json({ error: 'Ошибка поиска оборудования по коду' });
   }
 });
 
@@ -1435,6 +2048,24 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       })
       .returning();
 
+    await logAuditEvent({
+      req,
+      action: 'EQUIPMENT_CREATE',
+      category: 'EQUIPMENT',
+      severity: 'INFO',
+      entityType: 'equipment',
+      entityId: created.id,
+      entityLabel: `${created.inventory_number} — ${created.name}`,
+      summary: `Добавлено оборудование «${created.name}» (инв. № ${created.inventory_number})`,
+      details: {
+        id: created.id,
+        inventory_number: created.inventory_number,
+        typeName: foundType.name,
+        room_id: created.room_id,
+        initial_cost: created.initial_cost,
+      },
+    });
+
     res.status(201).json(created);
   } catch (error: any) {
     console.error('Create equipment error:', error);
@@ -1597,6 +2228,35 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
       .where(eq(equipment.id, eqId))
       .returning();
 
+    const changedKeys = Object.keys(updateData);
+    await logAuditEvent({
+      req,
+      action: 'EQUIPMENT_UPDATE',
+      category: 'EQUIPMENT',
+      severity: 'INFO',
+      entityType: 'equipment',
+      entityId: updated.id,
+      entityLabel: `${updated.inventory_number} — ${updated.name}`,
+      summary: `Обновлена карточка оборудования «${updated.name}» (${changedKeys.length} изм.)`,
+      details: {
+        changedFields: changedKeys,
+        before: {
+          name: existingItem.name,
+          inventory_number: existingItem.inventory_number,
+          room_id: existingItem.room_id,
+          initial_cost: existingItem.initial_cost,
+          residual_cost: existingItem.residual_cost,
+        },
+        after: {
+          name: updated.name,
+          inventory_number: updated.inventory_number,
+          room_id: updated.room_id,
+          initial_cost: updated.initial_cost,
+          residual_cost: updated.residual_cost,
+        },
+      },
+    });
+
     res.json(updated);
   } catch (error: any) {
     console.error('Update equipment error:', error);
@@ -1614,10 +2274,27 @@ app.delete('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, 
     const deleted = await db
       .delete(equipment)
       .where(eq(equipment.id, eqId))
-      .returning({ id: equipment.id });
+      .returning({
+        id: equipment.id,
+        inventory_number: equipment.inventory_number,
+        name: equipment.name,
+      });
     if (deleted.length === 0) {
       return res.status(404).json({ error: 'Оборудование не найдено или уже удалено' });
     }
+
+    await logAuditEvent({
+      req,
+      action: 'EQUIPMENT_DELETE',
+      category: 'EQUIPMENT',
+      severity: 'CRITICAL',
+      entityType: 'equipment',
+      entityId: deleted[0].id,
+      entityLabel: `${deleted[0].inventory_number} — ${deleted[0].name}`,
+      summary: `Удалено оборудование «${deleted[0].name}» (инв. № ${deleted[0].inventory_number})`,
+      details: { deletedItem: deleted[0] },
+    });
+
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -1635,7 +2312,27 @@ app.post('/api/equipment/bulk-delete', requireAuth, requireRole('ADMIN'), async 
     if (ids.length === 0) {
       return res.status(400).json({ error: 'Некорректные идентификаторы оборудования' });
     }
-    await db.delete(equipment).where(inArray(equipment.id, ids));
+    const deletedRows = await db
+      .delete(equipment)
+      .where(inArray(equipment.id, ids))
+      .returning({
+        id: equipment.id,
+        inventory_number: equipment.inventory_number,
+        name: equipment.name,
+      });
+
+    await logAuditEvent({
+      req,
+      action: 'EQUIPMENT_BULK_DELETE',
+      category: 'EQUIPMENT',
+      severity: 'CRITICAL',
+      entityType: 'equipment',
+      entityId: ids.join(','),
+      entityLabel: `Массовое удаление (${deletedRows.length} ед.)`,
+      summary: `Массово удалено ${deletedRows.length} единиц оборудования`,
+      details: { count: deletedRows.length, deletedIds: deletedRows.map((d: any) => d.id) },
+    });
+
     res.json({ success: true, deletedCount: ids.length });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -1650,9 +2347,23 @@ app.post('/api/equipment/bulk-delete', requireAuth, requireRole('ADMIN'), async 
 // Spec (PDF page 3): "В списке оборудования Администратор или Инженер должен иметь возможность выбрать несколько единиц оборудования из списка, нажать кнопку “Сгенерировать QR-коды” - в результате получает docx файл с данными QR-кодами для их дальнейшей распечатки."
 app.post('/api/equipment/qr-docx', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req, res) => {
   try {
-    const { equipment_ids } = req.body;
+    const { equipment_ids, qr_size_cm } = req.body;
     if (!Array.isArray(equipment_ids) || equipment_ids.length === 0) {
       return res.status(400).json({ error: 'Выберите хотя бы одну единицу оборудования' });
+    }
+
+    let qrSizeCm = 3;
+    if (qr_size_cm !== undefined && qr_size_cm !== null && qr_size_cm !== '') {
+      const parsed = Number(String(qr_size_cm).replace(',', '.'));
+      if (!Number.isFinite(parsed) || parsed < 0.8 || parsed > 10) {
+        return res.status(400).json({ error: 'Размер QR-кода должен быть от 0.8 до 10 см' });
+      }
+      qrSizeCm = Math.round(parsed * 10) / 10;
+    }
+
+    const ids = equipment_ids.map(Number).filter((id) => Number.isInteger(id) && id > 0);
+    if (ids.length === 0) {
+      return res.status(400).json({ error: 'Некорректные идентификаторы оборудования' });
     }
 
     const items = await db
@@ -1669,7 +2380,7 @@ app.post('/api/equipment/qr-docx', requireAuth, requireRole('ADMIN', 'ENGINEER')
       .from(equipment)
       .innerJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
       .innerJoin(rooms, eq(equipment.room_id, rooms.id))
-      .where(inArray(equipment.id, equipment_ids.map(Number)));
+      .where(inArray(equipment.id, ids));
 
     const baseUrl = getPublicBaseUrl(req);
     const formatted = items.map((i: any) => ({
@@ -1677,7 +2388,19 @@ app.post('/api/equipment/qr-docx', requireAuth, requireRole('ADMIN', 'ENGINEER')
       recivedDate: new Date(i.recived).toLocaleDateString('ru-RU'),
     }));
 
-    const docxBuffer = await generateQrDocx(formatted, baseUrl);
+    const docxBuffer = await generateQrDocx(formatted, baseUrl, { qrSizeCm });
+
+    await logAuditEvent({
+      req,
+      action: 'QR_DOCX',
+      category: 'DOCUMENT',
+      severity: 'INFO',
+      entityType: 'equipment',
+      entityId: ids.join(','),
+      entityLabel: `QR-этикетки (${formatted.length} ед., ${qrSizeCm}×${qrSizeCm} см)`,
+      summary: `Сформирован DOCX с QR-этикетками для ${formatted.length} ед. (размер ${qrSizeCm}×${qrSizeCm} см)`,
+      details: { count: formatted.length, qrSizeCm, equipmentIds: ids },
+    });
 
     res.setHeader(
       'Content-Type',
@@ -1685,7 +2408,7 @@ app.post('/api/equipment/qr-docx', requireAuth, requireRole('ADMIN', 'ENGINEER')
     );
     res.setHeader(
       'Content-Disposition',
-      'attachment; filename="equipment-qr-codes.docx"'
+      `attachment; filename="equipment-qr-${qrSizeCm}cm.docx"`
     );
     res.send(docxBuffer);
   } catch (error: any) {
@@ -1739,6 +2462,18 @@ app.post('/api/equipment/qr-group', requireAuth, requireRole('ADMIN', 'ENGINEER'
     const baseUrl = getPublicBaseUrl(req);
     const qrUrl = `${baseUrl}/q/${code}`;
 
+    await logAuditEvent({
+      req,
+      action: 'QR_GROUP_CREATE',
+      category: 'DOCUMENT',
+      severity: 'INFO',
+      entityType: 'batch',
+      entityId: batch.code,
+      entityLabel: batch.name,
+      summary: `Создан групповой QR партии ${batch.code} (${items.length} ед.)`,
+      details: { code: batch.code, itemsCount: items.length, equipmentIds: ids },
+    });
+
     res.status(201).json({
       ...batch,
       qrUrl,
@@ -1752,7 +2487,7 @@ app.post('/api/equipment/qr-group', requireAuth, requireRole('ADMIN', 'ENGINEER'
 });
 
 // Get Group QR Batch Info
-app.get('/api/equipment/qr-group/:code', optionalAuth, async (req: AuthRequest, res) => {
+app.get('/api/equipment/qr-group/:code', requireAuth, async (req: AuthRequest, res) => {
   try {
     const code = req.params.code;
     const [batch] = await db
@@ -1799,6 +2534,16 @@ app.get('/api/equipment/qr-group/:code', optionalAuth, async (req: AuthRequest, 
 app.get('/api/equipment/qr-group/:code/docx', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req, res) => {
   try {
     const code = req.params.code;
+    const rawSize = req.query.qr_size_cm;
+    let qrSizeCm = 3;
+    if (rawSize !== undefined && rawSize !== null && String(rawSize).trim() !== '') {
+      const parsed = Number(String(rawSize).replace(',', '.'));
+      if (!Number.isFinite(parsed) || parsed < 0.8 || parsed > 10) {
+        return res.status(400).json({ error: 'Размер QR-кода должен быть от 0.8 до 10 см' });
+      }
+      qrSizeCm = Math.round(parsed * 10) / 10;
+    }
+
     const [batch] = await db
       .select()
       .from(equipmentBatches)
@@ -1841,8 +2586,21 @@ app.get('/api/equipment/qr-group/:code/docx', requireAuth, requireRole('ADMIN', 
         roomNumber: items[0]?.roomNumber,
         items: formatted,
       },
-      baseUrl
+      baseUrl,
+      { qrSizeCm }
     );
+
+    await logAuditEvent({
+      req,
+      action: 'QR_GROUP_DOCX',
+      category: 'DOCUMENT',
+      severity: 'INFO',
+      entityType: 'batch',
+      entityId: batch.code,
+      entityLabel: batch.name || batch.code,
+      summary: `Сформирована групповая QR-карточка партии ${batch.code} (${formatted.length} ед., ${qrSizeCm}×${qrSizeCm} см)`,
+      details: { batchCode: batch.code, count: formatted.length, qrSizeCm },
+    });
 
     res.setHeader(
       'Content-Type',
@@ -2010,36 +2768,96 @@ function parseExcelDate(val: any): string | null {
 const normalizeHeaderKey = (k: string) =>
   k.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
 
-// Import Equipment from Excel
+// Import Equipment from Excel (supports duplicate detection & confirmation modes: ask | skip | update | copy)
 app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
-    const { rows, type_id } = req.body;
+    const { rows, type_id, duplicate_mode } = req.body;
     if (!Array.isArray(rows) || rows.length === 0) {
       return res.status(400).json({ error: 'Таблица пуста или содержит неверный формат' });
     }
 
+    const mode: 'ask' | 'skip' | 'update' | 'copy' =
+      duplicate_mode === 'skip' ||
+      duplicate_mode === 'update' ||
+      duplicate_mode === 'copy'
+        ? duplicate_mode
+        : 'ask';
+
     const selectedTypeId = type_id ? Number(type_id) : undefined;
     const errors: string[] = [];
-    const createdItems: any[] = [];
     const newRoomsCreated: string[] = [];
     const newTypesCreated: string[] = [];
 
-    // Cache rooms
-    const allRooms = await db.select().from(rooms);
-    const roomMap = new Map<string, number>();
-    allRooms.forEach((r: any) => roomMap.set(r.number.trim().toLowerCase(), r.id));
+    // Fetch existing equipment items for duplicate detection
+    const existingEquipmentRows = await db
+      .select({
+        id: equipment.id,
+        inventory_number: equipment.inventory_number,
+        name: equipment.name,
+        roomNumber: rooms.number,
+      })
+      .from(equipment)
+      .innerJoin(rooms, eq(equipment.room_id, rooms.id));
 
-    // Cache types
-    const allTypes = await db.select().from(equipmentTypes);
-    const typeMap = new Map<string, number>();
-    allTypes.forEach((t: any) => typeMap.set(t.name.trim().toLowerCase(), t.id));
+    type ExistingRecord = {
+      id: number;
+      inventory_number: string;
+      name: string;
+      roomNumber: string;
+    };
 
-    // Track ALL existing inventory numbers in DB AND inside this batch to prevent UNIQUE collisions
-    const existingInvRows = await db.select({ inv: equipment.inventory_number }).from(equipment);
-    const usedInvNums = new Set<string>(existingInvRows.map((r: any) => String(r.inv).trim()));
+    const existingByInv = new Map<string, ExistingRecord>();
+    const existingByNameRoom = new Map<string, ExistingRecord>();
+    const usedInvNumsLower = new Set<string>();
+
+    for (const r of existingEquipmentRows as any[]) {
+      const invClean = String(r.inventory_number || '').trim();
+      const rec: ExistingRecord = {
+        id: Number(r.id),
+        inventory_number: invClean,
+        name: String(r.name || ''),
+        roomNumber: String(r.roomNumber || ''),
+      };
+      if (invClean) {
+        existingByInv.set(invClean.toLowerCase(), rec);
+        usedInvNumsLower.add(invClean.toLowerCase());
+      }
+      const nrKey = `${rec.name.trim().toLowerCase()}||${rec.roomNumber.trim().toLowerCase()}`;
+      if (!existingByNameRoom.has(nrKey)) {
+        existingByNameRoom.set(nrKey, rec);
+      }
+    }
 
     const now = new Date();
     const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+    interface ParsedImportRow {
+      rowIndex: number;
+      rawInvNum: string;
+      invNum: string;
+      name: string;
+      cleanRoomStr: string;
+      typeNameRaw: string;
+      recivedDate: Date;
+      initialCost: number;
+      residualCost: number;
+      additional_fields: Record<string, any>;
+      matchedExisting: ExistingRecord | null;
+      matchReason: string | null;
+    }
+
+    const parsedRowsList: ParsedImportRow[] = [];
+    const duplicateMatches: Array<{
+      rowNumber: number;
+      inventory_number: string;
+      name: string;
+      roomNumber: string;
+      existingId: number;
+      existingInventoryNumber: string;
+      existingName: string;
+      existingRoom: string;
+      matchReason: string;
+    }> = [];
 
     for (let index = 0; index < rows.length; index++) {
       const row = rows[index];
@@ -2050,7 +2868,6 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         normalizedRow.set(normalizeHeaderKey(rawKey), row[rawKey]);
       }
 
-      // Helper to extract value by multiple alternative keys (Russian & English)
       const getVal = (...keys: string[]) => {
         for (const k of keys) {
           const nk = normalizeHeaderKey(k);
@@ -2062,8 +2879,7 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         return '';
       };
 
-      // Extract fields
-      let invNum = getVal(
+      const rawInvNum = getVal(
         'inventory_number',
         'Инвентарный номер',
         'Инвентарный №',
@@ -2072,6 +2888,7 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         'Инв. №',
         '№ п/п'
       );
+      let invNum = rawInvNum;
       let name = getVal(
         'name',
         'Наименование (по бухгалтерии)',
@@ -2094,6 +2911,12 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       const quantityRaw = getVal('Количество', 'Кол-во', 'quantity');
 
       const roomStr = getVal('room_number', 'room_id', 'Помещение', 'Кабинет', 'Аудитория');
+      if (!roomStr) {
+        errors.push(`Строка ${index + 1}: не указано помещение (столбец «Помещение»)`);
+        continue;
+      }
+      const cleanRoomStr = roomStr;
+
       const recivedRaw = getVal(
         'recived',
         'received',
@@ -2112,7 +2935,6 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       );
       const residualCostRaw = getVal('residual_cost', 'Остаточная стоимость');
 
-      // Auto-fallback for Name: use Description or Type if name is omitted
       if (!name) {
         name = description || (typeNameRaw ? `${typeNameRaw} (${roomStr ? `ауд. ${roomStr}` : 'б/н'})` : '');
       }
@@ -2120,22 +2942,43 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         name = `Материальная ценность №${index + 1}`;
       }
 
-      // Auto-fallback for Inventory Number: auto-generate if omitted
+      // Check whether this item already exists in DB before auto-generating suffixes
+      let matchedExisting: ExistingRecord | null = null;
+      let matchReason: string | null = null;
+
+      if (rawInvNum) {
+        const invHit = existingByInv.get(rawInvNum.toLowerCase());
+        if (invHit) {
+          matchedExisting = invHit;
+          matchReason = 'Совпадает инвентарный номер';
+        }
+      } else {
+        const nrKey = `${name.trim().toLowerCase()}||${cleanRoomStr.toLowerCase()}`;
+        const nrHit = existingByNameRoom.get(nrKey);
+        if (nrHit) {
+          matchedExisting = nrHit;
+          matchReason = 'Совпадает наименование и помещение';
+        }
+      }
+
+      if (matchedExisting && matchReason) {
+        duplicateMatches.push({
+          rowNumber: index + 1,
+          inventory_number: rawInvNum || '—',
+          name,
+          roomNumber: cleanRoomStr,
+          existingId: matchedExisting.id,
+          existingInventoryNumber: matchedExisting.inventory_number,
+          existingName: matchedExisting.name,
+          existingRoom: matchedExisting.roomNumber,
+          matchReason,
+        });
+      }
+
       if (!invNum) {
         invNum = `INV-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
       }
 
-      // Ensure unique inventory_number across DB AND earlier rows in this Excel file (e.g. shared kit numbers)
-      if (usedInvNums.has(invNum)) {
-        let suffix = 2;
-        while (usedInvNums.has(`${invNum}-${suffix}`)) {
-          suffix++;
-        }
-        invNum = `${invNum}-${suffix}`;
-      }
-      usedInvNums.add(invNum);
-
-      // Date parsing
       let recivedDate = new Date();
       if (recivedRaw) {
         const parsed = parseExcelDate(recivedRaw);
@@ -2147,61 +2990,6 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       const initialCost = parseFloat(initialCostRaw.replace(/\s+/g, '').replace(',', '.')) || 0;
       const residualCost = parseFloat(residualCostRaw.replace(/\s+/g, '').replace(',', '.')) || 0;
 
-      // Room resolving or auto-creation
-      let matchedRoomId: number | undefined;
-      const cleanRoomStr = roomStr || '308';
-      const cleanRoomKey = cleanRoomStr.toLowerCase();
-
-      if (roomMap.has(cleanRoomKey)) {
-        matchedRoomId = roomMap.get(cleanRoomKey);
-      } else {
-        const parsedNum = parseInt(cleanRoomStr.replace(/\D/g, ''), 10) || 1;
-        const floor = Math.max(1, Math.min(10, Math.floor(parsedNum / 100) || 1));
-        const [newRoom] = await db
-          .insert(rooms)
-          .values({ number: cleanRoomStr, floor })
-          .returning();
-        matchedRoomId = newRoom.id;
-        roomMap.set(cleanRoomKey, newRoom.id);
-        newRoomsCreated.push(cleanRoomStr);
-      }
-
-      // Type resolving or auto-creation
-      let matchedTypeId = selectedTypeId;
-      if (!matchedTypeId) {
-        let lookupType = (typeNameRaw || 'Периферия').toLowerCase();
-        if (lookupType.includes('компьют') || lookupType === 'пк') lookupType = 'компьютер';
-        else if (lookupType.includes('ноут')) lookupType = 'ноутбук';
-        else if (lookupType.includes('монитор')) lookupType = 'монитор';
-        else if (lookupType.includes('корпусн') || lookupType.includes('мебель') || lookupType.includes('шкаф') || lookupType.includes('стол')) lookupType = 'корпусная мебель';
-        else if (lookupType.includes('газлифт')) lookupType = 'стулья (газлифт)';
-        else if (lookupType.includes('iso')) lookupType = 'стулья iso';
-        else if (lookupType.includes('стул')) lookupType = 'стулья прочие';
-        else if (lookupType.includes('жалюзи')) lookupType = 'жалюзи';
-        else if (lookupType.includes('сетев') || lookupType.includes('коммутатор')) lookupType = 'сетевое оборудование';
-        else if (lookupType.includes('программн') || lookupType === 'по') lookupType = 'по (программное обеспечение)';
-        else if (lookupType.includes('перифер') || lookupType.includes('принтер') || lookupType.includes('сканер')) lookupType = 'периферия';
-
-        for (const [key, id] of typeMap.entries()) {
-          if (key.includes(lookupType) || lookupType.includes(key)) {
-            matchedTypeId = id;
-            break;
-          }
-        }
-
-        if (!matchedTypeId) {
-          const typeDisplayName = typeNameRaw || 'Периферия';
-          const [newType] = await db
-            .insert(equipmentTypes)
-            .values({ name: typeDisplayName, parent_id: null })
-            .returning();
-          matchedTypeId = newType.id;
-          typeMap.set(typeDisplayName.toLowerCase(), newType.id);
-          newTypesCreated.push(typeDisplayName);
-        }
-      }
-
-      // Parse dimensions (length, width, height)
       let length_cm: number | null = null;
       let width_cm: number | null = null;
       let height_cm: number | null = null;
@@ -2216,14 +3004,11 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         if (parts.length >= 3) height_cm = parts[2];
       }
 
-      // Parse warranty expiry
       let formattedWarrantyUntil: string | null = null;
       let isUnderWarranty = false;
-
       if (warrantyUntilRaw) {
         formattedWarrantyUntil = parseExcelDate(warrantyUntilRaw);
       }
-
       if (formattedWarrantyUntil) {
         isUnderWarranty = todayStr <= formattedWarrantyUntil;
       } else {
@@ -2231,13 +3016,11 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         isUnderWarranty = lowerW === 'да' || lowerW === 'true' || lowerW === '1';
       }
 
-      // Precious metals boolean
       const preciousMetals =
         preciousRaw.toLowerCase() === 'да' ||
         preciousRaw.toLowerCase() === 'true' ||
         preciousRaw === '1';
 
-      // Status & condition normalization
       let status = statusRaw || 'Действует';
       if (status.toLowerCase().includes('хранен')) status = 'На хранении';
       else status = 'Действует';
@@ -2276,7 +3059,6 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         }
       }
 
-      // Copy only genuinely extra custom columns (skip already-mapped accounting & department headers)
       const reservedKeys = new Set([
         'inventory_number', 'инвентарный номер', 'инвентарный №', 'инв. номер', 'инв номер', 'инв. №', '№ п/п',
         'name', 'наименование (по бухгалтерии)', 'наименование', 'наименование объекта', 'название',
@@ -2306,15 +3088,19 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         }
       }
 
-      createdItems.push({
-        inventory_number: invNum,
+      parsedRowsList.push({
+        rowIndex: index,
+        rawInvNum,
+        invNum,
         name,
-        type_id: matchedTypeId,
-        recived: recivedDate,
-        initial_cost: Math.round(initialCost * 100) / 100,
-        residual_cost: Math.round(residualCost * 100) / 100,
-        room_id: matchedRoomId,
+        cleanRoomStr,
+        typeNameRaw,
+        recivedDate,
+        initialCost: Math.round(initialCost * 100) / 100,
+        residualCost: Math.round(residualCost * 100) / 100,
         additional_fields,
+        matchedExisting,
+        matchReason,
       });
     }
 
@@ -2325,17 +3111,170 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       });
     }
 
-    // Insert all items atomically inside a transaction
+    // Ask user confirmation before touching DB when duplicates exist
+    if (mode === 'ask' && duplicateMatches.length > 0) {
+      return res.status(200).json({
+        requiresConfirmation: true,
+        totalRows: rows.length,
+        duplicatesCount: duplicateMatches.length,
+        newCount: rows.length - duplicateMatches.length,
+        duplicates: duplicateMatches,
+      });
+    }
+
+    // Cache rooms & types before applying confirmed writes
+    const allRooms = await db.select().from(rooms);
+    const roomMap = new Map<string, number>();
+    allRooms.forEach((r: any) => roomMap.set(r.number.trim().toLowerCase(), r.id));
+
+    const allTypes = await db.select().from(equipmentTypes);
+    const typeMap = new Map<string, number>();
+    allTypes.forEach((t: any) => typeMap.set(t.name.trim().toLowerCase(), t.id));
+
+    const resolveRoomId = async (tx: any, cleanRoomStr: string): Promise<number> => {
+      const cleanRoomKey = cleanRoomStr.toLowerCase();
+      const existing = roomMap.get(cleanRoomKey);
+      if (existing) return existing;
+      const parsedNum = parseInt(cleanRoomStr.replace(/\D/g, ''), 10) || 1;
+      const floor = Math.max(1, Math.min(10, Math.floor(parsedNum / 100) || 1));
+      const [newRoom] = await tx
+        .insert(rooms)
+        .values({ number: cleanRoomStr, floor })
+        .returning();
+      roomMap.set(cleanRoomKey, newRoom.id);
+      newRoomsCreated.push(cleanRoomStr);
+      return newRoom.id;
+    };
+
+    const resolveTypeId = async (tx: any, typeNameRaw: string): Promise<number> => {
+      if (selectedTypeId) return selectedTypeId;
+      let lookupType = (typeNameRaw || 'Периферия').toLowerCase();
+      if (lookupType.includes('компьют') || lookupType === 'пк') lookupType = 'компьютер';
+      else if (lookupType.includes('ноут')) lookupType = 'ноутбук';
+      else if (lookupType.includes('монитор')) lookupType = 'монитор';
+      else if (lookupType.includes('корпусн') || lookupType.includes('мебель') || lookupType.includes('шкаф') || lookupType.includes('стол')) lookupType = 'корпусная мебель';
+      else if (lookupType.includes('газлифт')) lookupType = 'стулья (газлифт)';
+      else if (lookupType.includes('iso')) lookupType = 'стулья iso';
+      else if (lookupType.includes('стул')) lookupType = 'стулья прочие';
+      else if (lookupType.includes('жалюзи')) lookupType = 'жалюзи';
+      else if (lookupType.includes('сетев') || lookupType.includes('коммутатор')) lookupType = 'сетевое оборудование';
+      else if (lookupType.includes('программн') || lookupType === 'по') lookupType = 'по (программное обеспечение)';
+      else if (lookupType.includes('перифер') || lookupType.includes('принтер') || lookupType.includes('сканер')) lookupType = 'периферия';
+
+      for (const [key, id] of typeMap.entries()) {
+        if (key.includes(lookupType) || lookupType.includes(key)) {
+          return id;
+        }
+      }
+
+      const typeDisplayName = typeNameRaw || 'Периферия';
+      const [newType] = await tx
+        .insert(equipmentTypes)
+        .values({ name: typeDisplayName, parent_id: null })
+        .returning();
+      typeMap.set(typeDisplayName.toLowerCase(), newType.id);
+      newTypesCreated.push(typeDisplayName);
+      return newType.id;
+    };
+
+    let insertedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+    const updatedExistingIds = new Set<number>();
+
     await db.transaction(async (tx: any) => {
-      for (const item of createdItems) {
-        await tx.insert(equipment).values(item);
+      for (const item of parsedRowsList) {
+        if (mode === 'skip' && item.matchedExisting) {
+          skippedCount++;
+          continue;
+        }
+
+        const matchedRoomId = await resolveRoomId(tx, item.cleanRoomStr);
+        const matchedTypeId = await resolveTypeId(tx, item.typeNameRaw);
+
+        if (
+          mode === 'update' &&
+          item.matchedExisting &&
+          !updatedExistingIds.has(item.matchedExisting.id)
+        ) {
+          await tx
+            .update(equipment)
+            .set({
+              name: item.name,
+              type_id: matchedTypeId,
+              recived: item.recivedDate,
+              initial_cost: item.initialCost,
+              residual_cost: item.residualCost,
+              room_id: matchedRoomId,
+              additional_fields: item.additional_fields,
+            })
+            .where(eq(equipment.id, item.matchedExisting.id));
+          updatedExistingIds.add(item.matchedExisting.id);
+          updatedCount++;
+          continue;
+        }
+
+        // Insert new record (with unique suffix if duplicate already exists in DB or earlier in batch)
+        let finalInvNum = item.invNum;
+        if (usedInvNumsLower.has(finalInvNum.toLowerCase())) {
+          let suffix = 2;
+          while (usedInvNumsLower.has(`${finalInvNum}-${suffix}`.toLowerCase())) {
+            suffix++;
+          }
+          finalInvNum = `${finalInvNum}-${suffix}`;
+        }
+        usedInvNumsLower.add(finalInvNum.toLowerCase());
+
+        await tx.insert(equipment).values({
+          inventory_number: finalInvNum,
+          name: item.name,
+          type_id: matchedTypeId,
+          recived: item.recivedDate,
+          initial_cost: item.initialCost,
+          residual_cost: item.residualCost,
+          room_id: matchedRoomId,
+          additional_fields: item.additional_fields,
+        });
+        insertedCount++;
       }
     });
 
-    res.status(201).json({
+    const summaryParts: string[] = [];
+    if (insertedCount > 0) summaryParts.push(`добавлено: ${insertedCount}`);
+    if (updatedCount > 0) summaryParts.push(`обновлено: ${updatedCount}`);
+    if (skippedCount > 0) summaryParts.push(`пропущено дубликатов: ${skippedCount}`);
+
+    await logAuditEvent({
+      req,
+      action: 'EQUIPMENT_IMPORT',
+      category: 'EQUIPMENT',
+      severity: insertedCount > 0 || updatedCount > 0 ? 'WARNING' : 'INFO',
+      entityType: 'equipment',
+      entityLabel: `Импорт Excel (${rows.length} строк)`,
+      summary:
+        summaryParts.length > 0
+          ? `Импорт из Excel завершён (${summaryParts.join(', ')})`
+          : 'Импорт из Excel завершён без новых записей',
+      details: {
+        duplicateMode: mode,
+        totalRows: rows.length,
+        insertedCount,
+        updatedCount,
+        skippedCount,
+        createdRooms: newRoomsCreated,
+        createdTypes: newTypesCreated,
+      },
+    });
+
+    res.status(insertedCount > 0 || updatedCount > 0 ? 201 : 200).json({
       success: true,
-      message: `Успешно импортировано ${createdItems.length} единиц оборудования!`,
-      count: createdItems.length,
+      message:
+        summaryParts.length > 0
+          ? `Импорт завершён (${summaryParts.join(', ')}).`
+          : 'Новых записей для импорта не найдено.',
+      count: insertedCount,
+      updatedCount,
+      skippedCount,
       createdRooms: newRoomsCreated,
       createdTypes: newTypesCreated,
     });
@@ -2393,6 +3332,18 @@ app.post('/api/writeoff/update-status', requireAuth, requireRole('ADMIN', 'ENGIN
         });
     }
 
+    await logAuditEvent({
+      req,
+      action: 'WRITEOFF_STATUS',
+      category: 'WRITEOFF',
+      severity: state === 'WRITTEN_OFF' ? 'CRITICAL' : 'WARNING',
+      entityType: 'equipment',
+      entityId: validIds.join(','),
+      entityLabel: `Статус списания → ${state} (${validIds.length} ед.)`,
+      summary: `Изменён статус списания на ${state} для ${validIds.length} ед. оборудования`,
+      details: { state, equipmentIds: validIds, writeoffDate: date },
+    });
+
     res.json({ success: true, count: validIds.length });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -2400,7 +3351,7 @@ app.post('/api/writeoff/update-status', requireAuth, requireRole('ADMIN', 'ENGIN
 });
 
 // Download Sample Writeoff Act DOCX (Case 1 example matching accounting template)
-app.get('/api/writeoff/sample-act', async (_req, res) => {
+app.get('/api/writeoff/sample-act', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
   try {
     const sampleItems = [
       {
@@ -2441,7 +3392,7 @@ app.get('/api/writeoff/sample-act', async (_req, res) => {
 });
 
 // Download Sample Transfer Invoice DOCX (ОКУД 0501460 — example with kit components)
-app.get('/api/writeoff/sample-invoice', async (_req, res) => {
+app.get('/api/writeoff/sample-invoice', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
   try {
     const sampleItems = [
       {
@@ -2515,7 +3466,7 @@ app.get('/api/writeoff/sample-invoice', async (_req, res) => {
 });
 
 // Download Sample Writeoff Act DOCX (Case 2: Малоценка с ДМ)
-app.get('/api/writeoff/sample-act-case2', async (_req, res) => {
+app.get('/api/writeoff/sample-act-case2', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
   try {
     const sampleItems = [
       {
@@ -2556,7 +3507,7 @@ app.get('/api/writeoff/sample-act-case2', async (_req, res) => {
 });
 
 // Download Sample Form 434 Invoice DOCX (Case 2: Малоценка)
-app.get('/api/writeoff/sample-invoice-case2', async (_req, res) => {
+app.get('/api/writeoff/sample-invoice-case2', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
   try {
     const sampleItems = [
       {
@@ -2629,7 +3580,7 @@ app.get('/api/writeoff/sample-invoice-case2', async (_req, res) => {
 });
 
 // Download Sample Writeoff Act DOCX (Case 3: Малоценка без ДМ)
-app.get('/api/writeoff/sample-act-case3', async (_req, res) => {
+app.get('/api/writeoff/sample-act-case3', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
   try {
     const sampleItems = [
       {
@@ -2754,6 +3705,8 @@ async function handleGenerateActRequest(req: any, res: any) {
     const actNumberParam = req.body?.act_number ?? req.query?.act_number ?? '';
     const reasonParam = req.body?.reason || req.query?.reason || 'начисленная амортизация составляет 100%';
     const techConclusionParam = req.body?.technical_conclusion_number || req.query?.technical_conclusion_number || '';
+    const organizationParam = req.body?.organization || req.query?.organization || undefined;
+    const departmentParam = req.body?.department || req.query?.department || undefined;
     const caseTypeParam = String(req.body?.case_type || req.query?.case_type || 'auto').toLowerCase();
 
     const formatted = orderedItems.map((i: any) => ({
@@ -2789,6 +3742,8 @@ async function handleGenerateActRequest(req: any, res: any) {
         ? await generateLowValueNoDmWriteoffActDocx(formatted, String(actNumberParam || ''), {
             writeoffDate: writeoffDateParam,
             actDate: writeoffDateParam,
+            organization: organizationParam ? String(organizationParam) : undefined,
+            department: departmentParam ? String(departmentParam) : undefined,
           })
         : resolvedCase === 'case2'
         ? await generateLowValueWriteoffActDocx(formatted, {
@@ -2796,12 +3751,16 @@ async function handleGenerateActRequest(req: any, res: any) {
             actDate: writeoffDateParam,
             reason: req.body?.reason || req.query?.reason,
             technicalConclusionNumber: String(techConclusionParam),
+            organization: organizationParam ? String(organizationParam) : undefined,
+            department: departmentParam ? String(departmentParam) : undefined,
           })
         : await generateWriteoffDocx(formatted, String(actNumberParam || ''), {
             writeoffDate: writeoffDateParam,
             actDate: writeoffDateParam,
             reason: String(reasonParam),
             technicalConclusionNumber: String(techConclusionParam),
+            organization: organizationParam ? String(organizationParam) : undefined,
+            department: departmentParam ? String(departmentParam) : undefined,
           });
 
     const dateTag = new Date().toISOString().slice(0, 10);
@@ -2811,6 +3770,23 @@ async function handleGenerateActRequest(req: any, res: any) {
         : resolvedCase === 'case2'
         ? `akt-malotsenka-dm-${items.length}-ed-${dateTag}.docx`
         : `akt-spisaniya-${items.length}-ed-${dateTag}.docx`;
+    await logAuditEvent({
+      req,
+      action: 'WRITEOFF_ACT_DOCX',
+      category: 'DOCUMENT',
+      severity: 'INFO',
+      entityType: 'writeoff',
+      entityId: formatted.length === 1 ? formatted[0].id : undefined,
+      entityLabel: actNumberParam ? `Акт №${actNumberParam}` : `Акт списания (${resolvedCase})`,
+      summary: `Сформирован акт списания (${resolvedCase}, позиций: ${formatted.length}${actNumberParam ? `, №${actNumberParam}` : ''})`,
+      details: {
+        resolvedCase,
+        actNumber: actNumberParam || null,
+        itemCount: formatted.length,
+        equipmentIds: formatted.map((x: any) => x.id),
+      },
+    });
+
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -2826,9 +3802,9 @@ async function handleGenerateActRequest(req: any, res: any) {
   }
 }
 
-app.post('/api/writeoff/generate-act', requireAuth, handleGenerateActRequest);
-app.get('/api/writeoff/generate-act', requireAuth, handleGenerateActRequest);
-app.get('/api/writeoff/act/:id', requireAuth, handleGenerateActRequest);
+app.post('/api/writeoff/generate-act', requireAuth, requireRole('ADMIN', 'ENGINEER'), handleGenerateActRequest);
+app.get('/api/writeoff/generate-act', requireAuth, requireRole('ADMIN', 'ENGINEER'), handleGenerateActRequest);
+app.get('/api/writeoff/act/:id', requireAuth, requireRole('ADMIN', 'ENGINEER'), handleGenerateActRequest);
 
 // Generate Transfer Invoice DOCX (Supports Case 1: ОКУД 0501460 & Case 2: Форма 434; Case 3 has NO invoice)
 async function handleGenerateInvoiceRequest(req: any, res: any) {
@@ -2934,6 +3910,18 @@ async function handleGenerateInvoiceRequest(req: any, res: any) {
       'Content-Disposition',
       `attachment; filename="${asciiFilename}"`
     );
+    await logAuditEvent({
+      req,
+      action: 'WRITEOFF_INVOICE_DOCX',
+      category: 'DOCUMENT',
+      severity: 'INFO',
+      entityType: 'equipment',
+      entityId: ids.join(','),
+      entityLabel: asciiFilename,
+      summary: `Сформирована накладная списания (${orderedItems.length} ед.)`,
+      details: { filename: asciiFilename, count: orderedItems.length, equipmentIds: ids },
+    });
+
     res.send(buffer);
   } catch (error: any) {
     console.error('Error generating transfer invoice:', error);
@@ -2941,8 +3929,8 @@ async function handleGenerateInvoiceRequest(req: any, res: any) {
   }
 }
 
-app.post('/api/writeoff/generate-invoice', requireAuth, handleGenerateInvoiceRequest);
-app.get('/api/writeoff/generate-invoice', requireAuth, handleGenerateInvoiceRequest);
+app.post('/api/writeoff/generate-invoice', requireAuth, requireRole('ADMIN', 'ENGINEER'), handleGenerateInvoiceRequest);
+app.get('/api/writeoff/generate-invoice', requireAuth, requireRole('ADMIN', 'ENGINEER'), handleGenerateInvoiceRequest);
 
 // ==========================================
 // 7. ISSUE TRACKING & NOTIFICATIONS
@@ -3023,6 +4011,18 @@ app.post('/api/equipment/:id/issues', requireAuth, async (req: AuthRequest, res)
       });
     }
 
+    await logAuditEvent({
+      req,
+      action: 'ISSUE_REPORT',
+      category: 'MAINTENANCE',
+      severity: state === 'CRITICAL_ISSUE' ? 'CRITICAL' : 'WARNING',
+      entityType: 'equipment',
+      entityId: eqId,
+      entityLabel: `Оборудование #${eqId}`,
+      summary: `Зарегистрирована неисправность (${state}): ${String(description).trim().slice(0, 140)}`,
+      details: { issueId: createdIssue.id, state, brokenAt: brokenDate },
+    });
+
     res.status(201).json(createdIssue);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -3081,6 +4081,20 @@ app.post('/api/issues/batch', requireAuth, requireRole('ADMIN', 'ENGINEER'), asy
       }
     }
 
+    await logAuditEvent({
+      req,
+      action: 'ISSUE_BATCH',
+      category: 'MAINTENANCE',
+      severity: 'WARNING',
+      entityType: 'equipment',
+      entityLabel: `Пакетная заявка (${createdIssues.length} ед.)`,
+      summary: `Массовая регистрация неисправностей: добавлено записей — ${createdIssues.length}`,
+      details: {
+        count: createdIssues.length,
+        equipmentIds: createdIssues.map((i: any) => i.equipment_id),
+      },
+    });
+
     res.status(201).json({ success: true, count: createdIssues.length });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -3091,6 +4105,9 @@ app.post('/api/issues/batch', requireAuth, requireRole('ADMIN', 'ENGINEER'), asy
 app.get('/api/equipment/:id/issues', requireAuth, async (req, res) => {
   try {
     const eqId = Number(req.params.id);
+    if (!Number.isInteger(eqId) || eqId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор оборудования' });
+    }
     const history = await db
       .select()
       .from(equipmentIssues)
@@ -3106,15 +4123,49 @@ app.get('/api/equipment/:id/issues', requireAuth, async (req, res) => {
 app.post('/api/issues/:issueId/repair', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req, res) => {
   try {
     const issueId = Number(req.params.issueId);
+    if (!Number.isInteger(issueId) || issueId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор неисправности' });
+    }
     const { repaired_at } = req.body;
+    const repairedDate = repaired_at ? new Date(repaired_at) : new Date();
+    if (isNaN(repairedDate.getTime())) {
+      return res.status(400).json({ error: 'Некорректная дата ремонта' });
+    }
+
+    const [existingIssue] = await db
+      .select()
+      .from(equipmentIssues)
+      .where(eq(equipmentIssues.id, issueId))
+      .limit(1);
+
+    if (!existingIssue) {
+      return res.status(404).json({ error: 'Запись о неисправности не найдена' });
+    }
+    if (existingIssue.repaired_at) {
+      return res.status(400).json({ error: 'Неисправность уже отмечена как отремонтированная' });
+    }
 
     const [updated] = await db
       .update(equipmentIssues)
       .set({
-        repaired_at: repaired_at ? new Date(repaired_at) : new Date(),
+        repaired_at: repairedDate,
       })
-      .where(eq(equipmentIssues.id, issueId))
+      .where(and(eq(equipmentIssues.id, issueId), isNull(equipmentIssues.repaired_at)))
       .returning();
+
+    if (updated) {
+      await logAuditEvent({
+        req,
+        action: 'ISSUE_REPAIR',
+        category: 'MAINTENANCE',
+        severity: 'INFO',
+        entityType: 'issue',
+        entityId: updated.id,
+        entityLabel: `Оборудование #${updated.equipment_id}`,
+        summary: `Неисправность #${updated.id} отмечена как отремонтированная`,
+        details: { issueId: updated.id, equipmentId: updated.equipment_id, repairedAt: updated.repaired_at },
+      });
+    }
 
     res.json(updated);
   } catch (error: any) {
@@ -3245,6 +4296,24 @@ app.post('/api/equipment/transfers', requireAuth, requireRole('ADMIN', 'ENGINEER
       return res.status(400).json({ error: errors.join('; ') });
     }
 
+    await logAuditEvent({
+      req,
+      action: 'TRANSFER_CREATE',
+      category: 'TRANSFER',
+      severity: 'INFO',
+      entityType: 'equipment',
+      entityId: equipment_ids.join(','),
+      entityLabel: `Передача (${equipment_ids.length} ед.) → ${String(issued_to).trim()}`,
+      summary: `Передано во временное пользование (${equipment_ids.length} ед.) получателю «${String(issued_to).trim()}»`,
+      details: {
+        equipmentIds: equipment_ids,
+        issuedTo: String(issued_to).trim(),
+        transferDate,
+        expectedReturnDate,
+        warnings: errors,
+      },
+    });
+
     res.status(201).json({
       success: true,
       message: 'Оборудование передано во временное пользование',
@@ -3259,15 +4328,49 @@ app.post('/api/equipment/transfers', requireAuth, requireRole('ADMIN', 'ENGINEER
 app.post('/api/transfers/:id/return', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req, res) => {
   try {
     const transferId = Number(req.params.id);
+    if (!Number.isInteger(transferId) || transferId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор передачи' });
+    }
     const { returned_at } = req.body;
+    const returnedDate = returned_at ? new Date(returned_at) : new Date();
+    if (isNaN(returnedDate.getTime())) {
+      return res.status(400).json({ error: 'Некорректная дата возврата' });
+    }
+
+    const [existingTransfer] = await db
+      .select()
+      .from(equipmentTransfers)
+      .where(eq(equipmentTransfers.id, transferId))
+      .limit(1);
+
+    if (!existingTransfer) {
+      return res.status(404).json({ error: 'Запись о передаче оборудования не найдена' });
+    }
+    if (existingTransfer.returned_at) {
+      return res.status(400).json({ error: 'Оборудование по данной передаче уже возвращено' });
+    }
 
     const [updated] = await db
       .update(equipmentTransfers)
       .set({
-        returned_at: returned_at ? new Date(returned_at) : new Date(),
+        returned_at: returnedDate,
       })
-      .where(eq(equipmentTransfers.id, transferId))
+      .where(and(eq(equipmentTransfers.id, transferId), isNull(equipmentTransfers.returned_at)))
       .returning();
+
+    if (updated) {
+      await logAuditEvent({
+        req,
+        action: 'TRANSFER_RETURN',
+        category: 'TRANSFER',
+        severity: 'INFO',
+        entityType: 'transfer',
+        entityId: updated.id,
+        entityLabel: `Оборудование #${updated.equipment_id} ← ${updated.issued_to}`,
+        summary: `Оформлен возврат оборудования #${updated.equipment_id} от «${updated.issued_to}»`,
+        details: { transferId: updated.id, equipmentId: updated.equipment_id, returnedAt: updated.returned_at },
+      });
+    }
 
     res.json(updated);
   } catch (error: any) {
@@ -3275,10 +4378,13 @@ app.post('/api/transfers/:id/return', requireAuth, requireRole('ADMIN', 'ENGINEE
   }
 });
 
-// Transfer History for single equipment (Chronological order, page 15)
-app.get('/api/equipment/:id/transfers', requireAuth, async (req, res) => {
+// Transfer History for single equipment (Chronological order, page 15 — Admin/Engineer only)
+app.get('/api/equipment/:id/transfers', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req, res) => {
   try {
     const eqId = Number(req.params.id);
+    if (!Number.isInteger(eqId) || eqId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор оборудования' });
+    }
     const history = await db
       .select()
       .from(equipmentTransfers)
@@ -3351,6 +4457,18 @@ app.post('/api/inventory/start', requireAuth, requireRole('ADMIN', 'ENGINEER'), 
         verified_at: null,
       });
     }
+
+    await logAuditEvent({
+      req,
+      action: 'INVENTORY_START',
+      category: 'INVENTORY',
+      severity: 'INFO',
+      entityType: 'inventory',
+      entityId: newInventory.id,
+      entityLabel: `Инвентаризация #${newInventory.id}`,
+      summary: `Начата инвентаризация #${newInventory.id} (${allEq.length} ед. к проверке)`,
+      details: { inventoryId: newInventory.id, itemsToVerify: allEq.length },
+    });
 
     res.status(201).json({
       success: true,
@@ -3454,10 +4572,29 @@ app.get('/api/inventory/current/unverified', requireAuth, requireRole('ADMIN', '
 
 // Confirm verification ("Проверено")
 // Spec (PDF page 17): "Если у аудитора есть текущая инвентаризация, то ему дополнительно предоставляется возможность изменить статус оборудования как прошедшего инвентаризацию (нажать кнопку “Проверено”). В дальнейшем эта кнопка отсутствует, пока для аудитора не появится новая инвентаризация."
-app.post('/api/inventory/:inventoryId/verify/:equipmentId', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req, res) => {
+app.post('/api/inventory/:inventoryId/verify/:equipmentId', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
   try {
     const inventoryId = Number(req.params.inventoryId);
     const eqId = Number(req.params.equipmentId);
+    if (!Number.isInteger(inventoryId) || inventoryId <= 0 || !Number.isInteger(eqId) || eqId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор инвентаризации или оборудования' });
+    }
+
+    const [audit] = await db
+      .select()
+      .from(inventories)
+      .where(eq(inventories.id, inventoryId))
+      .limit(1);
+
+    if (!audit) {
+      return res.status(404).json({ error: 'Инвентаризация не найдена' });
+    }
+    if (audit.auditor_ext_id !== req.user!.id && req.user!.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Вы не являетесь аудитором данной инвентаризации' });
+    }
+    if (audit.finished_at) {
+      return res.status(400).json({ error: 'Инвентаризация уже завершена' });
+    }
 
     const [updated] = await db
       .update(verifications)
@@ -3476,6 +4613,18 @@ app.post('/api/inventory/:inventoryId/verify/:equipmentId', requireAuth, require
       return res.status(404).json({ error: 'Запись инвентаризации для данного оборудования не найдена' });
     }
 
+    await logAuditEvent({
+      req,
+      action: 'INVENTORY_VERIFY',
+      category: 'INVENTORY',
+      severity: 'INFO',
+      entityType: 'equipment',
+      entityId: eqId,
+      entityLabel: `Инвентаризация #${inventoryId} • Оборудование #${eqId}`,
+      summary: `Подтверждено наличие оборудования #${eqId} в инвентаризации #${inventoryId}`,
+      details: { inventoryId, equipmentId: eqId, verifiedAt: updated.verified_at },
+    });
+
     res.json({ success: true, verified_at: updated.verified_at });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -3486,6 +4635,9 @@ app.post('/api/inventory/:inventoryId/verify/:equipmentId', requireAuth, require
 app.post('/api/inventory/:id/finish', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
   try {
     const invId = Number(req.params.id);
+    if (!Number.isInteger(invId) || invId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор инвентаризации' });
+    }
 
     const [audit] = await db
       .select()
@@ -3496,6 +4648,12 @@ app.post('/api/inventory/:id/finish', requireAuth, requireRole('ADMIN', 'ENGINEE
     if (!audit) {
       return res.status(404).json({ error: 'Инвентаризация не найдена' });
     }
+    if (audit.auditor_ext_id !== req.user!.id && req.user!.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'Завершить инвентаризацию может только проводивший её аудитор или администратор' });
+    }
+    if (audit.finished_at) {
+      return res.status(400).json({ error: 'Инвентаризация уже завершена' });
+    }
 
     const [finished] = await db
       .update(inventories)
@@ -3505,14 +4663,363 @@ app.post('/api/inventory/:id/finish', requireAuth, requireRole('ADMIN', 'ENGINEE
       .where(eq(inventories.id, invId))
       .returning();
 
+    await logAuditEvent({
+      req,
+      action: 'INVENTORY_FINISH',
+      category: 'INVENTORY',
+      severity: 'INFO',
+      entityType: 'inventory',
+      entityId: invId,
+      entityLabel: `Инвентаризация #${invId}`,
+      summary: `Завершена инвентаризация #${invId}`,
+      details: { inventoryId: invId, finishedAt: finished?.finished_at },
+    });
+
     res.json({ success: true, inventory: finished || audit });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
+// Completed Inventories History (Admin or Engineer)
+app.get('/api/inventory/history', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
+  try {
+    const completed = await db
+      .select({
+        id: inventories.id,
+        auditor_ext_id: inventories.auditor_ext_id,
+        auditorLogin: users.login,
+        started_at: inventories.started_at,
+        finished_at: inventories.finished_at,
+      })
+      .from(inventories)
+      .leftJoin(users, eq(inventories.auditor_ext_id, users.id))
+      .where(sql`${inventories.finished_at} IS NOT NULL`)
+      .orderBy(desc(inventories.finished_at))
+      .limit(30);
+
+    if (completed.length === 0) {
+      return res.json([]);
+    }
+
+    const invIds = completed.map((c: any) => c.id);
+    const allVerifs = await db
+      .select({
+        inventory_id: verifications.inventory_id,
+        verified_at: verifications.verified_at,
+      })
+      .from(verifications)
+      .where(inArray(verifications.inventory_id, invIds));
+
+    const statsMap = new Map<number, { total: number; verified: number }>();
+    for (const v of allVerifs) {
+      const current = statsMap.get(v.inventory_id) || { total: 0, verified: 0 };
+      current.total += 1;
+      if (v.verified_at !== null) current.verified += 1;
+      statsMap.set(v.inventory_id, current);
+    }
+
+    const enriched = completed.map((c: any) => {
+      const st = statsMap.get(c.id) || { total: 0, verified: 0 };
+      return {
+        ...c,
+        totalCount: st.total,
+        verifiedCount: st.verified,
+        pendingCount: st.total - st.verified,
+      };
+    });
+
+    res.json(enriched);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==========================================
-// 10. FRONTEND INTEGRATION & DEV SERVER
+// 10. AUDIT LOGS & ROLE-BASED LOGGING CAPABILITIES
+// ==========================================
+
+function buildRoleScopedAuditFilter(user: NonNullable<AuthRequest['user']>) {
+  if (user.role === 'ADMIN') {
+    return null;
+  }
+  if (user.role === 'ENGINEER') {
+    return or(
+      inArray(auditLogs.category, ENGINEER_ALLOWED_CATEGORIES),
+      and(eq(auditLogs.category, 'AUTH'), eq(auditLogs.actor_id, user.id))
+    );
+  }
+  // USER: strictly own activity logs
+  return eq(auditLogs.actor_id, user.id);
+}
+
+// Get current user's logging role capabilities
+app.get('/api/audit-logs/capabilities', requireAuth, async (req: AuthRequest, res) => {
+  const user = req.user!;
+  res.json(getRoleLogCapabilities(user.role));
+});
+
+// Query audit logs strictly scoped to user role capabilities
+app.get('/api/audit-logs', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const user = req.user!;
+    const capabilities = getRoleLogCapabilities(user.role);
+
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
+    const category = req.query.category ? String(req.query.category).trim().toUpperCase() : '';
+    const severity = req.query.severity ? String(req.query.severity).trim().toUpperCase() : '';
+    const search = req.query.search ? String(req.query.search).trim() : '';
+    const actorIdParam = req.query.actor_id ? Number(req.query.actor_id) : undefined;
+    const dateFrom = req.query.date_from ? new Date(`${String(req.query.date_from)}T00:00:00`) : undefined;
+    const dateTo = req.query.date_to ? new Date(`${String(req.query.date_to)}T23:59:59.999`) : undefined;
+
+    if (category && !capabilities.allowedCategories.includes(category as any)) {
+      return res.status(403).json({
+        error: `Роль «${capabilities.roleLabel}» не имеет доступа к категории журнала «${category}»`,
+      });
+    }
+
+    if (actorIdParam && !capabilities.canViewAllUsers && actorIdParam !== user.id) {
+      return res.status(403).json({
+        error: 'У вашей роли нет прав для просмотра событий других пользователей',
+      });
+    }
+
+    const conditions: any[] = [];
+    const roleScope = buildRoleScopedAuditFilter(user);
+    if (roleScope) conditions.push(roleScope);
+
+    if (category) conditions.push(eq(auditLogs.category, category));
+    if (severity) conditions.push(eq(auditLogs.severity, severity));
+    if (actorIdParam && capabilities.canViewAllUsers) {
+      conditions.push(eq(auditLogs.actor_id, actorIdParam));
+    }
+    if (dateFrom && !isNaN(dateFrom.getTime())) {
+      conditions.push(gte(auditLogs.created_at, dateFrom));
+    }
+    if (dateTo && !isNaN(dateTo.getTime())) {
+      conditions.push(lte(auditLogs.created_at, dateTo));
+    }
+    if (search) {
+      const searchConds: any[] = [
+        ilike(auditLogs.summary, `%${search}%`),
+        ilike(auditLogs.action, `%${search}%`),
+        ilike(auditLogs.entity_label, `%${search}%`),
+        ilike(auditLogs.entity_id, `%${search}%`),
+      ];
+      if (capabilities.canViewAllUsers) {
+        searchConds.push(ilike(auditLogs.actor_login, `%${search}%`));
+      }
+      if (capabilities.canViewTechnicalMeta) {
+        searchConds.push(ilike(auditLogs.ip_address, `%${search}%`));
+      }
+      conditions.push(or(...searchConds));
+    }
+
+    const whereExpr = conditions.length > 0 ? and(...conditions) : undefined;
+
+    const allMatched = await db
+      .select()
+      .from(auditLogs)
+      .where(whereExpr)
+      .orderBy(desc(auditLogs.created_at), desc(auditLogs.id));
+
+    const total = allMatched.length;
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const offset = (page - 1) * limit;
+    const paged = allMatched.slice(offset, offset + limit).map((row: any) => {
+      if (capabilities.canViewTechnicalMeta || row.actor_id === user.id) {
+        return row;
+      }
+      const { ip_address: _ip, user_agent: _ua, ...safeRow } = row;
+      return safeRow;
+    });
+
+    // Scope-wide stats for the summary strip
+    const scopeRows = roleScope
+      ? await db.select({ severity: auditLogs.severity }).from(auditLogs).where(roleScope)
+      : await db.select({ severity: auditLogs.severity }).from(auditLogs);
+
+    const stats = {
+      total: scopeRows.length,
+      info: scopeRows.filter((r: any) => r.severity === 'INFO').length,
+      warning: scopeRows.filter((r: any) => r.severity === 'WARNING').length,
+      critical: scopeRows.filter((r: any) => r.severity === 'CRITICAL').length,
+    };
+
+    let actors: Array<{ id: number | null; login: string; role: string }> | undefined;
+    if (capabilities.canViewAllUsers) {
+      const allUsersRows = await db
+        .select({ id: users.id, login: users.login, role: users.role })
+        .from(users)
+        .orderBy(users.id);
+      actors = allUsersRows;
+    }
+
+    res.json({
+      items: paged,
+      total,
+      page,
+      totalPages,
+      stats,
+      capabilities,
+      actors,
+    });
+  } catch (error: any) {
+    console.error('Error querying audit logs:', error);
+    res.status(500).json({ error: error.message || 'Ошибка чтения журнала событий' });
+  }
+});
+
+// Export audit logs (ADMIN: all visible logs; ENGINEER: operational logs only; USER: 403)
+app.get('/api/audit-logs/export', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const user = req.user!;
+    const capabilities = getRoleLogCapabilities(user.role);
+    if (!capabilities.canExport) {
+      return res.status(403).json({
+        error: `Роль «${capabilities.roleLabel}» не имеет прав на экспорт журнала событий`,
+      });
+    }
+
+    const format = String(req.query.format || 'xlsx').toLowerCase();
+    const category = req.query.category ? String(req.query.category).trim().toUpperCase() : '';
+    const severity = req.query.severity ? String(req.query.severity).trim().toUpperCase() : '';
+
+    if (category && !capabilities.allowedCategories.includes(category as any)) {
+      return res.status(403).json({
+        error: `Категория «${category}» недоступна для роли «${capabilities.roleLabel}»`,
+      });
+    }
+
+    const conditions: any[] = [];
+    const roleScope = buildRoleScopedAuditFilter(user);
+    if (roleScope) conditions.push(roleScope);
+    if (category) conditions.push(eq(auditLogs.category, category));
+    if (severity) conditions.push(eq(auditLogs.severity, severity));
+
+    const rows = await db
+      .select()
+      .from(auditLogs)
+      .where(conditions.length > 0 ? and(...conditions) : undefined)
+      .orderBy(desc(auditLogs.created_at), desc(auditLogs.id));
+
+    const sanitized = rows.map((r: any) => ({
+      id: r.id,
+      created_at: r.created_at,
+      actor_login: r.actor_login,
+      actor_role: r.actor_role,
+      category: r.category,
+      severity: r.severity,
+      action: r.action,
+      entity_type: r.entity_type,
+      entity_id: r.entity_id,
+      entity_label: r.entity_label,
+      summary: r.summary,
+      ...(capabilities.canViewTechnicalMeta ? { ip_address: r.ip_address || '' } : {}),
+    }));
+
+    await logAuditEvent({
+      req,
+      action: 'LOGS_EXPORT',
+      category: user.role === 'ADMIN' ? 'SECURITY' : 'DOCUMENT',
+      severity: 'INFO',
+      entityType: 'system',
+      entityLabel: `Экспорт журнала (${format.toUpperCase()})`,
+      summary: `Выгружен журнал событий (${sanitized.length} записей, формат ${format.toUpperCase()})`,
+      details: { format, exportedCount: sanitized.length, category: category || 'ALL', severity: severity || 'ALL' },
+    });
+
+    const dateTag = new Date().toISOString().slice(0, 10);
+    if (format === 'json') {
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="audit-logs-${dateTag}.json"`);
+      return res.send(JSON.stringify(sanitized, null, 2));
+    }
+
+    const sheetRows = sanitized.map((r: any) => {
+      const baseRow: Record<string, any> = {
+        'ID': r.id,
+        'Дата и время': new Date(r.created_at).toLocaleString('ru-RU'),
+        'Пользователь': sanitizeSpreadsheetCell(r.actor_login || 'Система'),
+        'Роль': sanitizeSpreadsheetCell(r.actor_role || '—'),
+        'Категория': sanitizeSpreadsheetCell(r.category),
+        'Уровень': sanitizeSpreadsheetCell(r.severity),
+        'Код события': sanitizeSpreadsheetCell(r.action),
+        'Объект': sanitizeSpreadsheetCell(r.entity_label || (r.entity_id ? `#${r.entity_id}` : '—')),
+        'Описание': sanitizeSpreadsheetCell(r.summary),
+      };
+      if (capabilities.canViewTechnicalMeta) {
+        baseRow['IP-адрес'] = sanitizeSpreadsheetCell(r.ip_address || '');
+      }
+      return baseRow;
+    });
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(sheetRows);
+    XLSX.utils.book_append_sheet(wb, ws, 'Журнал действий');
+    const xlsxBuf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="audit-logs-${dateTag}.xlsx"`);
+    res.send(xlsxBuf);
+  } catch (error: any) {
+    console.error('Error exporting audit logs:', error);
+    res.status(500).json({ error: error.message || 'Ошибка экспорта журнала' });
+  }
+});
+
+// Purge / archive rotation of audit logs (ADMIN ONLY)
+app.delete('/api/audit-logs/purge', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res) => {
+  try {
+    const rawDays = req.body?.older_than_days ?? req.query?.older_than_days;
+    const days = rawDays === undefined || rawDays === null || rawDays === '' ? 90 : Number(rawDays);
+    if (!Number.isFinite(days) || days < 0 || days > 3650) {
+      return res.status(400).json({ error: 'Укажите срок хранения от 0 до 3650 дней' });
+    }
+
+    let deletedRows: Array<{ id: number }> = [];
+    if (days === 0) {
+      deletedRows = await db.delete(auditLogs).returning({ id: auditLogs.id });
+    } else {
+      const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      deletedRows = await db
+        .delete(auditLogs)
+        .where(lt(auditLogs.created_at, cutoff))
+        .returning({ id: auditLogs.id });
+    }
+
+    await logAuditEvent({
+      req,
+      action: 'LOGS_PURGE',
+      category: 'SECURITY',
+      severity: 'CRITICAL',
+      entityType: 'system',
+      entityLabel: 'Ротация журнала событий',
+      summary:
+        days === 0
+          ? `Выполнена полная очистка журнала событий (удалено записей: ${deletedRows.length})`
+          : `Удалены записи журнала старше ${days} дн. (удалено: ${deletedRows.length})`,
+      details: { olderThanDays: days, deletedCount: deletedRows.length },
+    });
+
+    res.json({
+      success: true,
+      deletedCount: deletedRows.length,
+      message: `Удалено записей журнала: ${deletedRows.length}`,
+    });
+  } catch (error: any) {
+    console.error('Error purging audit logs:', error);
+    res.status(500).json({ error: error.message || 'Ошибка очистки журнала' });
+  }
+});
+
+// ==========================================
+// 11. FRONTEND INTEGRATION & DEV SERVER
 // ==========================================
 
 async function startServer() {

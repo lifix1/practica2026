@@ -91,26 +91,51 @@ export const RoomsManager: React.FC<RoomsManagerProps> = ({
       )}
 
       {/* Grid of rooms */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-        {(Array.isArray(rooms) ? rooms : []).map((room) => (
-          <div
-            key={room.id}
-            className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs hover:border-blue-300 transition-all flex items-center gap-3.5"
-          >
-            <div className="w-12 h-12 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-700 font-bold text-sm shrink-0">
-              {room.number}
-            </div>
-            <div>
-              <div className="font-bold text-slate-900 text-sm">
-                Аудитория {room.number}
-              </div>
-              <div className="text-xs text-slate-500">
-                Этаж: {room.floor}
-              </div>
-            </div>
+      {!Array.isArray(rooms) || rooms.length === 0 ? (
+        <div className="bg-white p-12 rounded-2xl border border-slate-200 text-center space-y-3">
+          <div className="w-12 h-12 rounded-2xl bg-slate-100 flex items-center justify-center text-slate-400 mx-auto">
+            <DoorOpen className="w-6 h-6" />
           </div>
-        ))}
-      </div>
+          <div className="space-y-1">
+            <h3 className="text-sm font-bold text-slate-800">
+              Список кабинетов и аудиторий пуст
+            </h3>
+            <p className="text-xs text-slate-500 max-w-md mx-auto">
+              Добавьте помещения кафедры вручную или загрузите таблицу оборудования из Excel — аудитории будут созданы автоматически.
+            </p>
+          </div>
+          {isAdmin && (
+            <button
+              onClick={() => setShowAddModal(true)}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-semibold shadow-xs inline-flex items-center gap-1.5"
+            >
+              <Plus className="w-4 h-4" />
+              Добавить первый кабинет
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+          {rooms.map((room) => (
+            <div
+              key={room.id}
+              className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs hover:border-blue-300 transition-all flex items-center gap-3.5"
+            >
+              <div className="w-12 h-12 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center text-blue-700 font-bold text-sm shrink-0 tabular-nums">
+                {room.number}
+              </div>
+              <div>
+                <div className="font-bold text-slate-900 text-sm">
+                  Аудитория {room.number}
+                </div>
+                <div className="text-xs text-slate-500 tabular-nums">
+                  Этаж: {room.floor}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Add Room Modal */}
       {showAddModal && (

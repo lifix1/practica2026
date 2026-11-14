@@ -5,6 +5,7 @@ import {
   FileSpreadsheet,
   Download,
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   Info,
 } from 'lucide-react';
@@ -35,6 +36,30 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
     createdRooms?: string[];
     createdTypes?: string[];
   } | null>(null);
+  const [duplicateConfirmation, setDuplicateConfirmation] = useState<{
+    totalRows: number;
+    duplicatesCount: number;
+    newCount: number;
+    duplicates: Array<{
+      rowNumber: number;
+      inventory_number: string;
+      name: string;
+      roomNumber: string;
+      existingId: number;
+      existingInventoryNumber: string;
+      existingName: string;
+      existingRoom: string;
+      matchReason: string;
+    }>;
+  } | null>(null);
+
+  React.useEffect(() => {
+    if (!isOpen) {
+      setDuplicateConfirmation(null);
+      setErrors([]);
+      setImportResult(null);
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -100,8 +125,8 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
           ? 'Шкаф для документов'
           : `Образец (${selectedType?.name || 'оборудование'})`,
         'Дата принятия к учету': '2026-01-15',
-        'Первоначальная стоимость': 45000,
-        'Остаточная стоимость': 32000,
+        'Первоначальная стоимость': 1450.0,
+        'Остаточная стоимость': 980.0,
         'Помещение': '308',
         'Место': 'Стол 1',
         'Размеры (Д*Ш*В), см': isFurniture ? '120*45*200' : '',
@@ -137,6 +162,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
     setFileName(file.name);
     setErrors([]);
     setImportResult(null);
+    setDuplicateConfirmation(null);
 
     const reader = new FileReader();
     reader.onload = (evt) => {
@@ -158,8 +184,10 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
     reader.readAsArrayBuffer(file);
   };
 
-  // Submit to server
-  const handleUpload = async () => {
+  // Submit to server (duplicate_mode: 'ask' checks first; confirmed action uses 'skip' | 'update' | 'copy')
+  const handleUpload = async (
+    duplicateMode: 'ask' | 'skip' | 'update' | 'copy' = 'ask'
+  ) => {
     if (parsedRows.length === 0) {
       setErrors(['Файл не содержит строк данных']);
       return;
@@ -176,6 +204,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
         body: JSON.stringify({
           rows: parsedRows,
           type_id: selectedTypeId || undefined,
+          duplicate_mode: duplicateMode,
         }),
       });
 
@@ -189,15 +218,28 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
         return;
       }
 
+      if (resData.requiresConfirmation) {
+        setDuplicateConfirmation({
+          totalRows: resData.totalRows,
+          duplicatesCount: resData.duplicatesCount,
+          newCount: resData.newCount,
+          duplicates: resData.duplicates || [],
+        });
+        return;
+      }
+
+      setDuplicateConfirmation(null);
       setImportResult({
         message: resData.message || 'Импорт успешно завершен!',
         createdRooms: resData.createdRooms,
         createdTypes: resData.createdTypes,
       });
       onSuccess();
-      setTimeout(() => {
-        onClose();
-      }, 1800);
+      if ((resData.count || 0) > 0 || (resData.updatedCount || 0) > 0) {
+        setTimeout(() => {
+          onClose();
+        }, 1800);
+      }
     } catch (err: any) {
       setErrors([err.message]);
     } finally {
@@ -219,7 +261,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                 Импорт таблицы учета кафедры из Excel
               </h3>
               <p className="text-xs text-emerald-200">
-                Поддержка выгрузки бухгалтерии (A–E) и дополнительных столбцов кафедры (F–R)
+                Поддержка выгрузки бухгалтерии и учётных характеристик кафедры (цены в BYN)
               </p>
             </div>
           </div>
@@ -280,15 +322,15 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
                 <div>
-                  <span className="font-semibold text-slate-700">Бухучёт (A–E):</span>{' '}
+                  <span className="font-semibold text-slate-700">Бухучёт (BYN):</span>{' '}
                   Инвентарный номер, Наименование, Дата принятия к учету, Первоначальная стоимость, Остаточная стоимость
                 </div>
                 <div>
-                  <span className="font-semibold text-slate-700">Размещение и габариты (F–J):</span>{' '}
-                  Помещение (создается автоматически), Место, Размеры (Д*Ш*В), см, Описание, Цвет
+                  <span className="font-semibold text-slate-700">Размещение и габариты:</span>{' '}
+                  Помещение (обязательно, создается автоматически), Место, Размеры (Д*Ш*В), см, Описание, Цвет
                 </div>
                 <div className="sm:col-span-2">
-                  <span className="font-semibold text-slate-700">Классификация и гарантия (K–R):</span>{' '}
+                  <span className="font-semibold text-slate-700">Классификация и гарантия:</span>{' '}
                   Тип оборудования, Статус (Действует / На хранении), Состояние, Категория (по бухучету), Содержание драгметаллов (Да/Нет), Оборудование на гарантии, Гарантия истекает (ДД.ММ.ГГГГ — статус обновится на «Нет» автоматически на следующий день после даты), Примечание.
                 </div>
               </div>
@@ -354,8 +396,103 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
             </div>
           )}
 
+          {/* Duplicate confirmation warning */}
+          {duplicateConfirmation && (
+            <div className="p-4 bg-amber-50 border-2 border-amber-300 rounded-2xl space-y-3 animate-fadeIn">
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <h4 className="text-xs sm:text-sm font-bold text-amber-950">
+                    Обнаружены уже добавленные в базу предметы (
+                    {duplicateConfirmation.duplicatesCount} из {duplicateConfirmation.totalRows})
+                  </h4>
+                  <p className="text-[11px] text-amber-900 leading-relaxed">
+                    Следующие позиции из файла уже присутствуют в системе. Подтвердите, что нужно
+                    сделать с повторяющимися предметами (новых позиций в файле:{' '}
+                    <strong>{duplicateConfirmation.newCount}</strong>):
+                  </p>
+                </div>
+              </div>
+
+              <div className="max-h-44 overflow-auto border border-amber-200 rounded-xl bg-white text-[11px]">
+                <table className="w-full text-left border-collapse">
+                  <thead className="bg-amber-100/70 border-b border-amber-200 text-amber-950 sticky top-0">
+                    <tr>
+                      <th className="p-2 font-semibold">Стр.</th>
+                      <th className="p-2 font-semibold">ID в БД</th>
+                      <th className="p-2 font-semibold">Инв. номер</th>
+                      <th className="p-2 font-semibold">Наименование (файл / база)</th>
+                      <th className="p-2 font-semibold">Помещение</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-amber-100">
+                    {duplicateConfirmation.duplicates.map((dup) => (
+                      <tr key={`${dup.rowNumber}-${dup.existingId}`} className="hover:bg-amber-50/40">
+                        <td className="p-2 text-slate-500 font-mono">#{dup.rowNumber}</td>
+                        <td className="p-2 font-mono font-bold text-amber-800 whitespace-nowrap">
+                          #{dup.existingId}
+                        </td>
+                        <td className="p-2 font-mono font-semibold text-blue-700 whitespace-nowrap">
+                          {dup.existingInventoryNumber}
+                        </td>
+                        <td className="p-2">
+                          <div className="font-medium text-slate-900">{dup.name}</div>
+                          {dup.existingName !== dup.name && (
+                            <div className="text-[10px] text-slate-500">
+                              В БД: {dup.existingName}
+                            </div>
+                          )}
+                        </td>
+                        <td className="p-2 text-slate-600 whitespace-nowrap">
+                          ауд. {dup.existingRoom}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => setDuplicateConfirmation(null)}
+                  disabled={loading}
+                  className="px-3 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-300 hover:bg-slate-100 rounded-xl"
+                >
+                  Отмена
+                </button>
+                {duplicateConfirmation.newCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleUpload('skip')}
+                    disabled={loading}
+                    className="px-3.5 py-1.5 text-xs font-bold bg-slate-800 hover:bg-slate-900 disabled:opacity-50 text-white rounded-xl"
+                  >
+                    Пропустить дубликаты (только новые: {duplicateConfirmation.newCount})
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => handleUpload('update')}
+                  disabled={loading}
+                  className="px-3.5 py-1.5 text-xs font-bold bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl"
+                >
+                  Обновить существующие
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleUpload('copy')}
+                  disabled={loading}
+                  className="px-3.5 py-1.5 text-xs font-bold bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-xl"
+                >
+                  Добавить как дубликаты (-2, -3)
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Preview snippet */}
-          {parsedRows.length > 0 && (
+          {parsedRows.length > 0 && !duplicateConfirmation && (
             <div>
               <h4 className="text-xs font-bold text-slate-700 mb-2">
                 Предпросмотр первых строк ({Math.min(5, parsedRows.length)} из {parsedRows.length}):
@@ -388,23 +525,25 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
           )}
 
           {/* Actions */}
-          <div className="border-t border-slate-200 pt-4 flex justify-end gap-2.5">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
-            >
-              Отмена
-            </button>
-            <button
-              type="button"
-              onClick={handleUpload}
-              disabled={loading || parsedRows.length === 0}
-              className="px-5 py-2 text-xs font-bold bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white rounded-xl shadow-xs transition-colors"
-            >
-              {loading ? 'Проверка и импорт...' : `Импортировать (${parsedRows.length})`}
-            </button>
-          </div>
+          {!duplicateConfirmation && (
+            <div className="border-t border-slate-200 pt-4 flex justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-100 rounded-xl transition-colors"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={() => handleUpload('ask')}
+                disabled={loading || parsedRows.length === 0}
+                className="px-5 py-2 text-xs font-bold bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white rounded-xl shadow-xs transition-colors"
+              >
+                {loading ? 'Проверка и импорт...' : `Импортировать (${parsedRows.length})`}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -17,3 +17,5 @@ services:
         sync: false
       - key: APP_URL
         sync: false
+      - key: SEED_ADMIN_PASSWORD
+        sync: false

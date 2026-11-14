@@ -179,6 +179,27 @@ export const equipmentBatches = pgTable('equipment_batch', {
   room_id: bigint('room_id', { mode: 'number' }),
 });
 
+// 15. Table "audit_log" (System & role-scoped action audit trail)
+export const auditLogs = pgTable('audit_log', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  created_at: timestamp('created_at').notNull().defaultNow(),
+  actor_id: bigint('actor_id', { mode: 'number' }).references(() => users.id, {
+    onDelete: 'set null',
+  }),
+  actor_login: text('actor_login'),
+  actor_role: text('actor_role'),
+  action: text('action').notNull(),
+  category: text('category').notNull(),
+  severity: text('severity').notNull().default('INFO'),
+  entity_type: text('entity_type'),
+  entity_id: text('entity_id'),
+  entity_label: text('entity_label'),
+  summary: text('summary').notNull(),
+  details: json('details').$type<Record<string, any> | null>(),
+  ip_address: text('ip_address'),
+  user_agent: text('user_agent'),
+});
+
 // Relations
 export const usersRelations = relations(users, ({ one, many }) => ({
   refreshToken: one(refreshTokens, {
@@ -287,5 +308,12 @@ export const verificationsRelations = relations(verifications, ({ one }) => ({
   inventory: one(inventories, {
     fields: [verifications.inventory_id],
     references: [inventories.id],
+  }),
+}));
+
+export const auditLogsRelations = relations(auditLogs, ({ one }) => ({
+  actor: one(users, {
+    fields: [auditLogs.actor_id],
+    references: [users.id],
   }),
 }));

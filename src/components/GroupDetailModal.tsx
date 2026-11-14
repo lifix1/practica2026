@@ -11,6 +11,7 @@ import {
 import QRCode from 'qrcode';
 import type { User } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
+import { QrSizeSelector } from './QrSizeSelector.tsx';
 
 interface GroupDetailModalProps {
   groupCode: string | null;
@@ -32,6 +33,7 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [downloadingDocx, setDownloadingDocx] = useState(false);
+  const [qrSizeCm, setQrSizeCm] = useState<number>(3);
   const [bulkVerifying, setBulkVerifying] = useState(false);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
@@ -73,14 +75,23 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
   const handleDownloadDocx = async () => {
     if (!data?.batch?.code) return;
     setDownloadingDocx(true);
+    setError(null);
     try {
-      const res = await apiFetch(`/api/equipment/qr-group/${data.batch.code}/docx`);
-      if (!res.ok) throw new Error('Ошибка скачивания карточки DOCX');
+      const res = await apiFetch(
+        `/api/equipment/qr-group/${data.batch.code}/docx?qr_size_cm=${encodeURIComponent(
+          String(qrSizeCm)
+        )}`
+      );
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Ошибка скачивания карточки DOCX');
+      }
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `group-qr-${data.batch.code}.docx`;
+      const sizeSlug = String(qrSizeCm).replace('.', '_');
+      a.download = `group-qr-${data.batch.code}-${sizeSlug}cm.docx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -191,25 +202,30 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
                 <p className="text-[11px] text-slate-500 leading-tight">
                   🔒 Доступен сотрудникам кафедры при сканировании. Посторонним наблюдателям возвращается 404 (пустышка).
                 </p>
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <button
-                    onClick={handleDownloadDocx}
-                    disabled={downloadingDocx}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1 shadow-2xs transition-colors"
-                  >
-                    <FileText className="w-3.5 h-3.5" />
-                    {downloadingDocx ? 'Загрузка...' : 'Карточка DOCX'}
-                  </button>
-                  {qrDataUrl && (
-                    <a
-                      href={qrDataUrl}
-                      download={`QR-${groupCode}.png`}
-                      className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 rounded-lg text-xs font-semibold inline-flex items-center gap-1 transition-colors"
+                <div className="pt-2 border-t border-slate-200/80 space-y-2">
+                  <QrSizeSelector value={qrSizeCm} onChange={setQrSizeCm} compact />
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      onClick={handleDownloadDocx}
+                      disabled={downloadingDocx}
+                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1 shadow-2xs transition-colors"
                     >
-                      <Download className="w-3.5 h-3.5" />
-                      PNG
-                    </a>
-                  )}
+                      <FileText className="w-3.5 h-3.5" />
+                      {downloadingDocx
+                        ? 'Загрузка...'
+                        : `Карточка DOCX (${qrSizeCm}×${qrSizeCm} см)`}
+                    </button>
+                    {qrDataUrl && (
+                      <a
+                        href={qrDataUrl}
+                        download={`QR-${groupCode}.png`}
+                        className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 rounded-lg text-xs font-semibold inline-flex items-center gap-1 transition-colors"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        PNG
+                      </a>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>

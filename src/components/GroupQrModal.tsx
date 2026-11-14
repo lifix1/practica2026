@@ -13,6 +13,7 @@ import {
 import QRCode from 'qrcode';
 import type { Equipment } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
+import { QrSizeSelector } from './QrSizeSelector.tsx';
 
 interface GroupQrModalProps {
   isOpen: boolean;
@@ -45,6 +46,7 @@ export const GroupQrModal: React.FC<GroupQrModalProps> = ({
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [copied, setCopied] = useState(false);
   const [downloadingDocx, setDownloadingDocx] = useState(false);
+  const [qrSizeCm, setQrSizeCm] = useState<number>(3);
 
   if (!isOpen) return null;
 
@@ -91,14 +93,23 @@ export const GroupQrModal: React.FC<GroupQrModalProps> = ({
   const handleDownloadDocx = async () => {
     if (!generatedBatch) return;
     setDownloadingDocx(true);
+    setError(null);
     try {
-      const res = await apiFetch(`/api/equipment/qr-group/${generatedBatch.code}/docx`);
-      if (!res.ok) throw new Error('Ошибка скачивания карточки');
+      const res = await apiFetch(
+        `/api/equipment/qr-group/${generatedBatch.code}/docx?qr_size_cm=${encodeURIComponent(
+          String(qrSizeCm)
+        )}`
+      );
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Ошибка скачивания карточки');
+      }
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `group-qr-${generatedBatch.code}.docx`;
+      const sizeSlug = String(qrSizeCm).replace('.', '_');
+      a.download = `group-qr-${generatedBatch.code}-${sizeSlug}cm.docx`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -256,15 +267,22 @@ export const GroupQrModal: React.FC<GroupQrModalProps> = ({
               </button>
             </div>
 
+            {/* QR Size Selector for DOCX export */}
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl">
+              <QrSizeSelector value={qrSizeCm} onChange={setQrSizeCm} />
+            </div>
+
             {/* Action buttons */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
               <button
                 onClick={handleDownloadDocx}
                 disabled={downloadingDocx}
                 className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold inline-flex items-center justify-center gap-1.5 shadow-xs transition-colors"
               >
                 <FileText className="w-4 h-4" />
-                {downloadingDocx ? 'Формирование DOCX...' : 'Скачать карточку партии (DOCX)'}
+                {downloadingDocx
+                  ? 'Формирование DOCX...'
+                  : `Карточка DOCX (${qrSizeCm}×${qrSizeCm} см)`}
               </button>
 
               <a

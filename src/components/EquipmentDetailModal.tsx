@@ -21,6 +21,7 @@ import type {
   AdditionalField,
 } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
+import { QrSizeSelector } from './QrSizeSelector.tsx';
 
 interface EquipmentDetailModalProps {
   equipmentId: number | null;
@@ -71,6 +72,8 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
     type: 'success' | 'error';
     text: string;
   } | null>(null);
+  const [qrSizeCm, setQrSizeCm] = useState<number>(3);
+  const [downloadingQrDocx, setDownloadingQrDocx] = useState(false);
 
   const isEngineer = currentUser?.role === 'ENGINEER';
   const isAdmin = currentUser?.role === 'ADMIN';
@@ -103,31 +106,6 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
   useEffect(() => {
     fetchDetail();
   }, [equipmentId, currentUser]);
-
-  const handleQuickLogin = async (loginRole: 'admin' | 'engineer' | 'user') => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await apiFetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ login: loginRole, password: `${loginRole}123` }),
-      });
-      const resData = await res.json();
-      if (!res.ok) throw new Error(resData.error || 'Ошибка авторизации');
-      if (resData.accessToken) {
-        localStorage.setItem('auth_token', resData.accessToken);
-      }
-      if (resData.user) {
-        localStorage.setItem('auth_user', JSON.stringify(resData.user));
-      }
-      onReloadList();
-      fetchDetail();
-    } catch (e: any) {
-      setError(e.message);
-      setLoading(false);
-    }
-  };
 
   if (!equipmentId) return null;
 
@@ -284,6 +262,41 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
     }
   };
 
+  // Download QR Sticker DOCX for current item
+  const handleDownloadSingleQrDocx = async () => {
+    if (!equipmentId) return;
+    setDownloadingQrDocx(true);
+    setActionFeedback(null);
+    try {
+      const res = await apiFetch('/api/equipment/qr-docx', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          equipment_ids: [equipmentId],
+          qr_size_cm: qrSizeCm,
+        }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Ошибка генерации QR DOCX');
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const sizeSlug = String(qrSizeCm).replace('.', '_');
+      a.download = `qr-${data?.inventory_number || equipmentId}-${sizeSlug}cm.docx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setActionFeedback({ type: 'error', text: err.message });
+    } finally {
+      setDownloadingQrDocx(false);
+    }
+  };
+
   // Download Act for current item
   const handleDownloadActForCurrentItem = async () => {
     if (!equipmentId) return;
@@ -428,18 +441,14 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
               </div>
 
               <div className="flex flex-wrap items-center justify-center gap-2 pt-2">
-                <button
-                  onClick={() => handleQuickLogin('admin')}
-                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs transition-colors flex items-center gap-1.5"
-                >
-                  Войти как Администратор
-                </button>
-                <button
-                  onClick={() => handleQuickLogin('engineer')}
-                  className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-medium transition-colors"
-                >
-                  Войти как Инженер
-                </button>
+                {onOpenLogin && (
+                  <button
+                    onClick={onOpenLogin}
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs transition-colors flex items-center gap-1.5"
+                  >
+                    Войти в систему
+                  </button>
+                )}
                 <button
                   onClick={fetchDetail}
                   className="px-3 py-2 border border-slate-300 hover:bg-slate-100 text-slate-700 rounded-xl text-xs font-medium transition-colors flex items-center gap-1.5"
@@ -447,14 +456,6 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                   <RefreshCw className="w-3.5 h-3.5" />
                   Повторить запрос
                 </button>
-                {onOpenLogin && (
-                  <button
-                    onClick={onOpenLogin}
-                    className="px-3 py-2 text-xs text-blue-600 hover:underline font-semibold"
-                  >
-                    Ввести другие учетные данные
-                  </button>
-                )}
               </div>
             </div>
           )}
@@ -667,13 +668,32 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                   <p className="text-[10px] text-slate-500 mt-1 max-w-[200px] leading-tight">
                     🔒 Защищенный шлюз: сотрудникам открывает паспорт, посторонним выдает 404 (пустышку).
                   </p>
-                  <a
-                    href={qrDataUrl}
-                    download={`QR-${data.inventory_number}.png`}
-                    className="mt-2 text-xs text-blue-600 hover:text-blue-800 font-semibold inline-flex items-center gap-1"
-                  >
-                    Скачать изображение QR
-                  </a>
+                  <div className="mt-2.5 flex flex-col items-center gap-2 w-full">
+                    {(isAdmin || isEngineer) && (
+                      <div className="w-full p-2.5 bg-white rounded-xl border border-slate-200 space-y-2">
+                        <QrSizeSelector value={qrSizeCm} onChange={setQrSizeCm} compact />
+                        <button
+                          type="button"
+                          onClick={handleDownloadSingleQrDocx}
+                          disabled={downloadingQrDocx}
+                          className="w-full px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          {downloadingQrDocx
+                            ? 'Формирование...'
+                            : `Этикетка DOCX (${qrSizeCm}×${qrSizeCm} см)`}
+                        </button>
+                      </div>
+                    )}
+                    <a
+                      href={qrDataUrl}
+                      download={`QR-${data.inventory_number}.png`}
+                      className="text-xs text-blue-600 hover:text-blue-800 font-semibold inline-flex items-center gap-1"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Скачать изображение QR (PNG)
+                    </a>
+                  </div>
                 </div>
 
                 {/* Passport Details column */}
@@ -1242,7 +1262,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
 
             <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1">
               <div className="font-semibold text-slate-800">{data?.name}</div>
-              <div className="text-slate-500 font-mono text-[11px]">
+              <div className="text-slate-500 font-mono text-[11px] tabular-nums">
                 Инв. № {data?.inventory_number} • Каб. {data?.roomNumber} •{' '}
                 {Number(data?.initial_cost).toLocaleString('ru-RU', {
                   minimumFractionDigits: 2,
@@ -1262,11 +1282,11 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                   onChange={(e: any) => setTargetWriteoffState(e.target.value)}
                   className="w-full p-2.5 border border-slate-300 rounded-xl outline-none font-medium"
                 >
-                  <option value="PREPARING">Готовится к списанию (PREPARING)</option>
+                  <option value="PREPARING">Готовится к списанию</option>
                   <option value="DOCUMENTS_PREPARATION">
-                    В процессе списания — подготовка документов (DOCUMENTS_PREPARATION)
+                    В процессе списания — подготовка документов
                   </option>
-                  <option value="WRITTEN_OFF">Окончательно списано с баланса (WRITTEN_OFF)</option>
+                  <option value="WRITTEN_OFF">Окончательно списано с баланса</option>
                 </select>
                 <p className="text-[11px] text-slate-500 mt-1">
                   {targetWriteoffState === 'DOCUMENTS_PREPARATION'

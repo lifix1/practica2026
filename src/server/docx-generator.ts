@@ -49,6 +49,36 @@ export interface TransferInvoiceOptions {
   note?: string;
 }
 
+export interface QrDocxOptions {
+  qrSizeCm?: number;
+}
+
+const MIN_QR_SIZE_CM = 0.8;
+const MAX_QR_SIZE_CM = 10;
+const DEFAULT_QR_SIZE_CM = 3;
+
+function normalizeQrSizeCm(sizeCm?: number): number {
+  if (typeof sizeCm !== 'number' || !Number.isFinite(sizeCm)) {
+    return DEFAULT_QR_SIZE_CM;
+  }
+  const clamped = Math.min(MAX_QR_SIZE_CM, Math.max(MIN_QR_SIZE_CM, sizeCm));
+  return Math.round(clamped * 10) / 10;
+}
+
+function cmToDocxPx(cm: number): number {
+  // docx converts px -> EMU via Math.round(px * 9525); 1 inch = 2.54 cm = 96 CSS px
+  return Number(((cm / 2.54) * 96).toFixed(3));
+}
+
+function cmToRasterPx(cm: number): number {
+  // ~300 DPI raster source for crisp laser/label printing
+  return Math.max(200, Math.min(900, Math.round((cm / 2.54) * 300)));
+}
+
+function formatCmText(cm: number): string {
+  return Number.isInteger(cm) ? String(cm) : cm.toFixed(1).replace('.', ',');
+}
+
 const THIN_BLACK_BORDER = {
   style: BorderStyle.SINGLE,
   size: 4,
@@ -289,25 +319,57 @@ function makeCell(
 
 export async function generateQrDocx(
   items: EquipmentForDocx[],
-  baseUrl: string
+  baseUrl: string,
+  options: QrDocxOptions = {}
 ): Promise<Buffer> {
+  const qrSizeCm = normalizeQrSizeCm(options.qrSizeCm);
+  const qrDocxPx = cmToDocxPx(qrSizeCm);
+  const qrRasterPx = cmToRasterPx(qrSizeCm);
+  const sizeLabel = `${formatCmText(qrSizeCm)}×${formatCmText(qrSizeCm)} см`;
+
+  // Adaptive columns & typography for A4 portrait (total table width 9600 DXA ≈ 16.9 cm)
+  const columns =
+    qrSizeCm <= 1.8 ? 4 : qrSizeCm <= 2.6 ? 3 : qrSizeCm <= 6.5 ? 2 : 1;
+  const totalTableWidth = 9600;
+  const cellWidth = Math.floor(totalTableWidth / columns);
+
+  const cellMargin =
+    columns === 4 ? 90 : columns === 3 ? 120 : columns === 2 ? 160 : 200;
+  const headerFontSize =
+    columns === 4 ? 12 : columns === 3 ? 14 : columns === 2 ? 16 : 18;
+  const nameFontSize =
+    columns === 4 ? 15 : columns === 3 ? 18 : columns === 2 ? 22 : 24;
+  const invFontSize =
+    columns === 4 ? 15 : columns === 3 ? 17 : columns === 2 ? 20 : 22;
+  const metaFontSize =
+    columns === 4 ? 12 : columns === 3 ? 14 : columns === 2 ? 16 : 18;
+  const gatewayFontSize =
+    columns === 4 ? 11 : columns === 3 ? 12 : columns === 2 ? 14 : 16;
+  const imageSpacing = columns === 4 ? 40 : 80;
+
   const tableRows: TableRow[] = [];
 
-  for (let i = 0; i < items.length; i += 2) {
-    const pair = items.slice(i, i + 2);
+  for (let i = 0; i < items.length; i += columns) {
+    const rowItems = items.slice(i, i + columns);
     const cells: TableCell[] = [];
 
-    for (const item of pair) {
+    for (const item of rowItems) {
       const qrUrl = `${baseUrl.replace(/\/$/, '')}/q/EQ-${item.id}`;
       const qrBuffer = await QRCode.toBuffer(qrUrl, {
-        width: 180,
+        width: qrRasterPx,
         margin: 1,
         errorCorrectionLevel: 'M',
       });
 
       const cell = new TableCell({
-        width: { size: 4500, type: WidthType.DXA },
-        margins: { top: 180, bottom: 180, left: 180, right: 180 },
+        width: { size: cellWidth, type: WidthType.DXA },
+        verticalAlign: VerticalAlign.CENTER,
+        margins: {
+          top: cellMargin,
+          bottom: cellMargin,
+          left: cellMargin,
+          right: cellMargin,
+        },
         borders: {
           top: { style: BorderStyle.SINGLE, size: 8, color: '64748B' },
           bottom: { style: BorderStyle.SINGLE, size: 8, color: '64748B' },
@@ -320,7 +382,7 @@ export async function generateQrDocx(
             children: [
               new TextRun({
                 text: 'КАФЕДРАЛЬНЫЙ УЧЕТ',
-                size: 16,
+                size: headerFontSize,
                 bold: true,
                 color: '475569',
               }),
@@ -332,18 +394,18 @@ export async function generateQrDocx(
               new TextRun({
                 text: item.name,
                 bold: true,
-                size: 22,
+                size: nameFontSize,
                 color: '0F172A',
               }),
             ],
           }),
           new Paragraph({
             alignment: AlignmentType.CENTER,
-            spacing: { before: 80, after: 80 },
+            spacing: { before: imageSpacing, after: imageSpacing },
             children: [
               new ImageRun({
                 data: qrBuffer,
-                transformation: { width: 140, height: 140 },
+                transformation: { width: qrDocxPx, height: qrDocxPx },
                 type: 'png',
               }),
             ],
@@ -352,36 +414,36 @@ export async function generateQrDocx(
             alignment: AlignmentType.CENTER,
             children: [
               new TextRun({
-                text: `Инв. №: `,
+                text: 'Инв. №: ',
                 bold: true,
-                size: 20,
+                size: invFontSize,
               }),
               new TextRun({
                 text: item.inventory_number,
                 bold: true,
-                size: 20,
+                size: invFontSize,
                 color: '1E40AF',
               }),
             ],
           }),
           new Paragraph({
             alignment: AlignmentType.CENTER,
-            spacing: { before: 40 },
+            spacing: { before: 30 },
             children: [
               new TextRun({
                 text: `Тип: ${item.typeName} | Кабинет: ${item.roomNumber}`,
-                size: 16,
+                size: metaFontSize,
                 color: '64748B',
               }),
             ],
           }),
           new Paragraph({
             alignment: AlignmentType.CENTER,
-            spacing: { before: 40 },
+            spacing: { before: 30 },
             children: [
               new TextRun({
                 text: `Шлюз: /q/EQ-${item.id}`,
-                size: 14,
+                size: gatewayFontSize,
                 color: '94A3B8',
               }),
             ],
@@ -391,28 +453,32 @@ export async function generateQrDocx(
       cells.push(cell);
     }
 
-    if (cells.length === 1) {
+    while (cells.length < columns) {
       cells.push(
         new TableCell({
-          width: { size: 4500, type: WidthType.DXA },
+          width: { size: cellWidth, type: WidthType.DXA },
           borders: NO_BORDERS,
           children: [new Paragraph({})],
         })
       );
     }
 
-    tableRows.push(new TableRow({ children: cells }));
+    tableRows.push(new TableRow({ cantSplit: true, children: cells }));
   }
 
   const doc = new Document({
     sections: [
       {
-        properties: {},
+        properties: {
+          page: {
+            margin: { top: 650, bottom: 650, left: 850, right: 850 },
+          },
+        },
         children: [
           new Paragraph({
             heading: HeadingLevel.HEADING_1,
             alignment: AlignmentType.CENTER,
-            spacing: { after: 200 },
+            spacing: { after: 180 },
             children: [
               new TextRun({
                 text: 'ИС «Учет материальных ценностей»',
@@ -424,10 +490,10 @@ export async function generateQrDocx(
           }),
           new Paragraph({
             alignment: AlignmentType.CENTER,
-            spacing: { after: 300 },
+            spacing: { after: 280 },
             children: [
               new TextRun({
-                text: `Инвентарные этикетки и QR-коды для оборудования кафедры (${items.length} шт.)`,
+                text: `Инвентарные этикетки и QR-коды для оборудования кафедры (${items.length} шт. • QR ${sizeLabel})`,
                 italics: true,
                 size: 20,
                 color: '475569',
@@ -436,7 +502,7 @@ export async function generateQrDocx(
           }),
           new Table({
             rows: tableRows,
-            width: { size: 9000, type: WidthType.DXA },
+            width: { size: totalTableWidth, type: WidthType.DXA },
           }),
         ],
       },
@@ -1566,11 +1632,17 @@ export interface GroupQrBatchData {
 
 export async function generateGroupQrDocx(
   batch: GroupQrBatchData,
-  baseUrl: string
+  baseUrl: string,
+  options: QrDocxOptions = {}
 ): Promise<Buffer> {
+  const qrSizeCm = normalizeQrSizeCm(options.qrSizeCm);
+  const qrDocxPx = cmToDocxPx(qrSizeCm);
+  const qrRasterPx = cmToRasterPx(qrSizeCm);
+  const sizeLabel = `${formatCmText(qrSizeCm)}×${formatCmText(qrSizeCm)} см`;
+
   const qrUrl = `${baseUrl.replace(/\/$/, '')}/q/${batch.code}`;
   const qrBuffer = await QRCode.toBuffer(qrUrl, {
-    width: 260,
+    width: qrRasterPx,
     margin: 1,
     errorCorrectionLevel: 'M',
   });
@@ -1661,11 +1733,11 @@ export async function generateGroupQrDocx(
           }),
           new Paragraph({
             alignment: AlignmentType.CENTER,
-            spacing: { after: 200 },
+            spacing: { after: 160 },
             children: [
               new ImageRun({
                 data: qrBuffer,
-                transformation: { width: 170, height: 170 },
+                transformation: { width: qrDocxPx, height: qrDocxPx },
                 type: 'png',
               }),
             ],
@@ -1687,7 +1759,7 @@ export async function generateGroupQrDocx(
             spacing: { after: 300 },
             children: [
               new TextRun({
-                text: `Защищенный шлюз доступа: ${qrUrl}`,
+                text: `Размер QR: ${sizeLabel}  •  Защищенный шлюз доступа: ${qrUrl}`,
                 size: 14,
                 color: '64748B',
                 italics: true,
