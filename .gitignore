@@ -8,10 +8,4 @@ coverage/
 !.env.example
 .aistudio/
 
-# Guides & setup documentation
-*guide*.md
-*GUIDE*.md
-*deploy*.md
-*DEPLOY*.md
-*setup*.md
-*SETUP*.md
+
