@@ -119,6 +119,7 @@
 ### Кабинеты и типы оборудования
 - `GET /api/rooms` *(auth)* — список кабинетов.
 - `POST /api/rooms` *(ADMIN)* — добавление кабинета (`number`, `floor`).
+- `DELETE /api/rooms/:id` *(ADMIN)* — удаление кабинета (при отсутствии закреплённого оборудования).
 - `GET /api/equipment-types` *(auth)* — иерархический список типов.
 - `POST /api/equipment-types` *(ADMIN)* — создание типа/подтипа.
 - `PUT /api/equipment-types/:id` *(ADMIN)* — переименование и изменение родительского типа (с защитой от циклов).

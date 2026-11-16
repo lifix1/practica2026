@@ -812,6 +812,62 @@ app.post('/api/rooms', requireAuth, requireRole('ADMIN'), async (req, res) => {
   }
 });
 
+// Delete Room (Admin only)
+app.delete('/api/rooms/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const roomId = Number(req.params.id);
+    if (!Number.isInteger(roomId) || roomId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор кабинета' });
+    }
+
+    const [existing] = await db
+      .select()
+      .from(rooms)
+      .where(eq(rooms.id, roomId))
+      .limit(1);
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Кабинет не найден' });
+    }
+
+    const [eqCount] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(equipment)
+      .where(eq(equipment.room_id, roomId));
+
+    if (Number(eqCount?.count || 0) > 0) {
+      return res.status(400).json({
+        error: `Нельзя удалить кабинет № ${existing.number}: за ним закреплено ${eqCount.count} ед. оборудования. Сначала перенесите или удалите оборудование.`,
+      });
+    }
+
+    // Clear nullable room_id on any group batches that pointed to this room
+    await db
+      .update(equipmentBatches)
+      .set({ room_id: null })
+      .where(eq(equipmentBatches.room_id, roomId));
+
+    await db.delete(rooms).where(eq(rooms.id, roomId));
+
+    await logAuditEvent({
+      req,
+      action: 'ROOM_DELETE',
+      category: 'ADMIN',
+      severity: 'WARNING',
+      entityType: 'room',
+      entityId: existing.id,
+      entityLabel: `Ауд. ${existing.number} (${existing.floor} этаж)`,
+      summary: `Удалено помещение «${existing.number}» (${existing.floor} этаж)`,
+      details: { roomId: existing.id, number: existing.number, floor: existing.floor },
+    });
+
+    res.json({ success: true, deletedId: roomId });
+  } catch (error: any) {
+    console.error('Delete room error:', error);
+    res.status(500).json({ error: error.message || 'Ошибка удаления кабинета' });
+  }
+});
+
 // Get Equipment Types (hierarchical)
 app.get('/api/equipment-types', requireAuth, async (_req, res) => {
   try {
