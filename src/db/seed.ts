@@ -84,7 +84,7 @@ export async function ensureTablesExist() {
     await db.execute(sql`
       CREATE TABLE IF NOT EXISTS equipment (
         id BIGSERIAL PRIMARY KEY,
-        inventory_number TEXT NOT NULL UNIQUE,
+        inventory_number TEXT NOT NULL,
         name TEXT NOT NULL,
         type_id BIGINT NOT NULL REFERENCES equipment_type(id),
         recived TIMESTAMP NOT NULL,
@@ -96,10 +96,24 @@ export async function ensureTablesExist() {
     `);
 
     await db.execute(sql`
-      DO $$ BEGIN
+      DO $$
+      DECLARE con_name text;
+      BEGIN
         ALTER TABLE equipment ALTER COLUMN initial_cost TYPE DOUBLE PRECISION;
         ALTER TABLE equipment ALTER COLUMN residual_cost TYPE DOUBLE PRECISION;
+        FOR con_name IN
+          SELECT c.conname
+          FROM pg_constraint c
+          JOIN pg_class t ON c.conrelid = t.oid
+          JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
+          WHERE t.relname = 'equipment' AND c.contype = 'u' AND a.attname = 'inventory_number'
+        LOOP
+          EXECUTE format('ALTER TABLE equipment DROP CONSTRAINT IF EXISTS %I', con_name);
+        END LOOP;
       EXCEPTION WHEN OTHERS THEN null; END $$;
+    `);
+    await db.execute(sql`
+      DROP INDEX IF EXISTS equipment_inventory_number_unique;
     `);
 
     await db.execute(sql`

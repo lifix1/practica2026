@@ -84,7 +84,7 @@ export const additionalFields = pgTable('additional_field', {
 // 7. Table "equipment"
 export const equipment = pgTable('equipment', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
-  inventory_number: text('inventory_number').notNull().unique(),
+  inventory_number: text('inventory_number').notNull(),
   name: text('name').notNull(),
   type_id: bigint('type_id', { mode: 'number' })
     .notNull()

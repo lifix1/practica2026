@@ -41,6 +41,7 @@ import {
   logAuditEvent,
 } from './src/server/audit-logger.ts';
 import {
+  detectEquipmentWriteoffCase,
   generateQrDocx,
   generateGroupQrDocx,
   generateWriteoffDocx,
@@ -48,6 +49,8 @@ import {
   generateLowValueWriteoffActDocx,
   generateLowValueInvoiceDocx,
   generateLowValueNoDmWriteoffActDocx,
+  generateMixedWriteoffActsDocx,
+  generateMixedInvoicesDocx,
 } from './src/server/docx-generator.ts';
 import {
   getAllAdditionalFieldsForType,
@@ -2114,23 +2117,35 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       });
     }
 
-    // Check unique inventory_number
-    const existing = await db
-      .select()
-      .from(equipment)
-      .where(eq(equipment.inventory_number, trimmedInv))
-      .limit(1);
+    const afObj = additional_fields || {};
+    const allowedCategories = ['Дорогостоящее', 'Малоценка', 'Мягкий инвентарь'];
+    if (!afObj.accounting_category || !allowedCategories.includes(String(afObj.accounting_category))) {
+      formErrors.push('Выберите обязательное поле «Категория (по бухучету)».');
+    }
+    const pmVal = afObj.precious_metals;
+    if (
+      typeof pmVal !== 'boolean' &&
+      pmVal !== 'true' &&
+      pmVal !== 'false'
+    ) {
+      formErrors.push('Укажите обязательное поле «Содержание драгметаллов» (Да или Нет).');
+    }
 
-    if (existing.length > 0) {
+    if (formErrors.length > 0) {
       return res.status(400).json({
-        error: `Оборудование с инвентарным номером «${trimmedInv}» уже существует в базе. Укажите другой номер или отредактируйте существующую карточку.`,
+        error: formErrors[0],
+        details: formErrors,
       });
     }
 
     // Validate additional fields
+    const normalizedInputFields = {
+      ...afObj,
+      precious_metals: pmVal === true || pmVal === 'true',
+    };
     const validation = await validateAdditionalFields(
       numericTypeId,
-      additional_fields || {},
+      normalizedInputFields,
       { typeName: foundType.name }
     );
 
@@ -2141,7 +2156,7 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       });
     }
 
-    const normalizedFields = computeDynamicWarranty(additional_fields || {});
+    const normalizedFields = computeDynamicWarranty(normalizedInputFields);
 
     const [created] = await db
       .insert(equipment)
@@ -2254,16 +2269,26 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
       });
     }
 
-    if (inventory_number !== undefined) {
-      const trimmedInv = String(inventory_number).trim();
-      const duplicate = await db
-        .select({ id: equipment.id })
-        .from(equipment)
-        .where(and(eq(equipment.inventory_number, trimmedInv), ne(equipment.id, eqId)))
-        .limit(1);
-      if (duplicate.length > 0) {
+    if (additional_fields !== undefined) {
+      const afObj = additional_fields || {};
+      if (
+        Object.prototype.hasOwnProperty.call(afObj, 'accounting_category') &&
+        !['Дорогостоящее', 'Малоценка', 'Мягкий инвентарь'].includes(
+          String(afObj.accounting_category || '')
+        )
+      ) {
         return res.status(400).json({
-          error: `Инвентарный номер «${trimmedInv}» уже используется другим оборудованием. Укажите уникальный номер.`,
+          error: 'Выберите обязательное поле «Категория (по бухучету)».',
+        });
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(afObj, 'precious_metals') &&
+        typeof afObj.precious_metals !== 'boolean' &&
+        afObj.precious_metals !== 'true' &&
+        afObj.precious_metals !== 'false'
+      ) {
+        return res.status(400).json({
+          error: 'Укажите обязательное поле «Содержание драгметаллов» (Да или Нет).',
         });
       }
     }
@@ -3370,15 +3395,8 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
           continue;
         }
 
-        // Insert new record (with unique suffix if duplicate already exists in DB or earlier in batch)
-        let finalInvNum = item.invNum;
-        if (usedInvNumsLower.has(finalInvNum.toLowerCase())) {
-          let suffix = 2;
-          while (usedInvNumsLower.has(`${finalInvNum}-${suffix}`.toLowerCase())) {
-            suffix++;
-          }
-          finalInvNum = `${finalInvNum}-${suffix}`;
-        }
+        // Insert new record keeping inventory_number exact and unchanged (no -2/-3 hyphen suffixes)
+        const finalInvNum = item.invNum;
         usedInvNumsLower.add(finalInvNum.toLowerCase());
 
         await tx.insert(equipment).values({
@@ -3871,75 +3889,112 @@ async function handleGenerateActRequest(req: any, res: any) {
       recivedRaw: i.recived,
     }));
 
-    const allLowValue = formatted.every((i: any) =>
-      String(i.additional_fields?.accounting_category || '')
-        .toLowerCase()
-        .includes('малоцен')
-    );
-    const anyPreciousMetals = formatted.some((i: any) =>
-      Boolean(i.additional_fields?.precious_metals)
-    );
-
-    const resolvedCase: 'case1' | 'case2' | 'case3' =
-      caseTypeParam === 'case3'
-        ? 'case3'
-        : caseTypeParam === 'case2'
-        ? 'case2'
-        : caseTypeParam === 'case1'
-        ? 'case1'
-        : allLowValue
-        ? anyPreciousMetals
-          ? 'case2'
-          : 'case3'
-        : 'case1';
-
-    const buffer =
-      resolvedCase === 'case3'
-        ? await generateLowValueNoDmWriteoffActDocx(formatted, String(actNumberParam || ''), {
-            writeoffDate: writeoffDateParam,
-            actDate: writeoffDateParam,
-            organization: organizationParam ? String(organizationParam) : undefined,
-            department: departmentParam ? String(departmentParam) : undefined,
-          })
-        : resolvedCase === 'case2'
-        ? await generateLowValueWriteoffActDocx(formatted, {
-            writeoffDate: writeoffDateParam,
-            actDate: writeoffDateParam,
-            reason: req.body?.reason || req.query?.reason,
-            technicalConclusionNumber: String(techConclusionParam),
-            organization: organizationParam ? String(organizationParam) : undefined,
-            department: departmentParam ? String(departmentParam) : undefined,
-          })
-        : await generateWriteoffDocx(formatted, String(actNumberParam || ''), {
-            writeoffDate: writeoffDateParam,
-            actDate: writeoffDateParam,
-            reason: String(reasonParam),
-            technicalConclusionNumber: String(techConclusionParam),
-            organization: organizationParam ? String(organizationParam) : undefined,
-            department: departmentParam ? String(departmentParam) : undefined,
-          });
-
+    let buffer: Buffer;
+    let resolvedCaseLabel: string;
+    let asciiFilename: string;
+    let exportedItems = formatted;
     const dateTag = new Date().toISOString().slice(0, 10);
-    const asciiFilename =
-      resolvedCase === 'case3'
-        ? `akt-malotsenka-bez-dm-${items.length}-poz-${dateTag}.docx`
-        : resolvedCase === 'case2'
-        ? `akt-malotsenka-dm-${items.length}-ed-${dateTag}.docx`
-        : `akt-spisaniya-${items.length}-ed-${dateTag}.docx`;
+
+    if (caseTypeParam === 'case1' || caseTypeParam === 'case2' || caseTypeParam === 'case3') {
+      resolvedCaseLabel = caseTypeParam;
+      buffer =
+        caseTypeParam === 'case3'
+          ? await generateLowValueNoDmWriteoffActDocx(formatted, String(actNumberParam || ''), {
+              writeoffDate: writeoffDateParam,
+              actDate: writeoffDateParam,
+              organization: organizationParam ? String(organizationParam) : undefined,
+              department: departmentParam ? String(departmentParam) : undefined,
+            })
+          : caseTypeParam === 'case2'
+          ? await generateLowValueWriteoffActDocx(formatted, {
+              writeoffDate: writeoffDateParam,
+              actDate: writeoffDateParam,
+              reason: req.body?.reason || req.query?.reason,
+              technicalConclusionNumber: String(techConclusionParam),
+              organization: organizationParam ? String(organizationParam) : undefined,
+              department: departmentParam ? String(departmentParam) : undefined,
+            })
+          : await generateWriteoffDocx(formatted, String(actNumberParam || ''), {
+              writeoffDate: writeoffDateParam,
+              actDate: writeoffDateParam,
+              reason: String(reasonParam),
+              technicalConclusionNumber: String(techConclusionParam),
+              organization: organizationParam ? String(organizationParam) : undefined,
+              department: departmentParam ? String(departmentParam) : undefined,
+            });
+      asciiFilename =
+        caseTypeParam === 'case3'
+          ? `akt-malotsenka-bez-dm-${formatted.length}-poz-${dateTag}.docx`
+          : caseTypeParam === 'case2'
+          ? `akt-malotsenka-dm-${formatted.length}-ed-${dateTag}.docx`
+          : `akt-spisaniya-${formatted.length}-ed-${dateTag}.docx`;
+    } else {
+      // Auto mode: detect each item's own writeoff case independently and skip items without a case (OTHER)
+      const case1Items: any[] = [];
+      const case2Items: any[] = [];
+      const case3Items: any[] = [];
+
+      for (const item of formatted) {
+        const c = detectEquipmentWriteoffCase(item);
+        if (c === 'case1') case1Items.push(item);
+        else if (c === 'case2') case2Items.push(item);
+        else if (c === 'case3') case3Items.push(item);
+      }
+
+      exportedItems = [...case1Items, ...case2Items, ...case3Items];
+      if (exportedItems.length === 0) {
+        return res.status(400).json({
+          error: 'Для выбранного оборудования нет кейса списания — документы не формируются.',
+        });
+      }
+
+      const presentCases = [
+        case1Items.length > 0 ? 'case1' : null,
+        case2Items.length > 0 ? 'case2' : null,
+        case3Items.length > 0 ? 'case3' : null,
+      ].filter(Boolean) as string[];
+
+      resolvedCaseLabel = presentCases.length === 1 ? presentCases[0] : presentCases.join('+');
+
+      buffer = await generateMixedWriteoffActsDocx(
+        case1Items,
+        case2Items,
+        case3Items,
+        String(actNumberParam || ''),
+        {
+          writeoffDate: writeoffDateParam,
+          actDate: writeoffDateParam,
+          reason: String(reasonParam),
+          technicalConclusionNumber: String(techConclusionParam),
+          organization: organizationParam ? String(organizationParam) : undefined,
+          department: departmentParam ? String(departmentParam) : undefined,
+        }
+      );
+
+      asciiFilename =
+        presentCases.length > 1
+          ? `akty-spisaniya-gruppa-${exportedItems.length}-ed-${dateTag}.docx`
+          : presentCases[0] === 'case3'
+          ? `akt-malotsenka-bez-dm-${case3Items.length}-poz-${dateTag}.docx`
+          : presentCases[0] === 'case2'
+          ? `akt-malotsenka-dm-${case2Items.length}-ed-${dateTag}.docx`
+          : `akt-spisaniya-${case1Items.length}-ed-${dateTag}.docx`;
+    }
+
     await logAuditEvent({
       req,
       action: 'WRITEOFF_ACT_DOCX',
       category: 'DOCUMENT',
       severity: 'INFO',
       entityType: 'writeoff',
-      entityId: formatted.length === 1 ? formatted[0].id : undefined,
-      entityLabel: actNumberParam ? `Акт №${actNumberParam}` : `Акт списания (${resolvedCase})`,
-      summary: `Сформирован акт списания (${resolvedCase}, позиций: ${formatted.length}${actNumberParam ? `, №${actNumberParam}` : ''})`,
+      entityId: exportedItems.length === 1 ? exportedItems[0].id : undefined,
+      entityLabel: actNumberParam ? `Акт №${actNumberParam}` : `Акт списания (${resolvedCaseLabel})`,
+      summary: `Сформирован акт списания (${resolvedCaseLabel}, позиций: ${exportedItems.length}${actNumberParam ? `, №${actNumberParam}` : ''})`,
       details: {
-        resolvedCase,
+        resolvedCase: resolvedCaseLabel,
         actNumber: actNumberParam || null,
-        itemCount: formatted.length,
-        equipmentIds: formatted.map((x: any) => x.id),
+        itemCount: exportedItems.length,
+        equipmentIds: exportedItems.map((x: any) => x.id),
       },
     });
 
@@ -4023,41 +4078,62 @@ async function handleGenerateInvoiceRequest(req: any, res: any) {
       recivedRaw: i.recived,
     }));
 
-    const allLowValue = formatted.every((i: any) =>
-      String(i.additional_fields?.accounting_category || '')
-        .toLowerCase()
-        .includes('малоцен')
-    );
-    const anyPreciousMetals = formatted.some((i: any) =>
-      Boolean(i.additional_fields?.precious_metals)
-    );
+    let buffer: Buffer;
+    let asciiFilename: string;
+    let exportedCount = formatted.length;
+    const dateTag = new Date().toISOString().slice(0, 10);
 
-    if (caseTypeParam === 'auto' && allLowValue && !anyPreciousMetals) {
-      return res.status(400).json({
-        error: 'Для малоценного оборудования без драгметаллов (Кейс 3) накладная не требуется — достаточно только Акта списания.',
+    if (caseTypeParam === 'case1' || caseTypeParam === 'case2') {
+      const isLowValue = caseTypeParam === 'case2';
+      buffer = isLowValue
+        ? await generateLowValueInvoiceDocx(formatted, {
+            invoiceNumber: String(invoiceNumber),
+            invoiceDate,
+            department: String(sender),
+          })
+        : await generateTransferInvoiceDocx(formatted, {
+            invoiceNumber: String(invoiceNumber),
+            invoiceDate,
+            sender: String(sender),
+            recipient: String(recipient),
+            note: String(note),
+          });
+      asciiFilename = isLowValue
+        ? `nakladnaya-forma-434-${dateTag}.docx`
+        : `nakladnaya-CIT-0501460-${dateTag}.docx`;
+    } else {
+      const case1Items: any[] = [];
+      const case2Items: any[] = [];
+      for (const item of formatted) {
+        const c = detectEquipmentWriteoffCase(item);
+        if (c === 'case1') case1Items.push(item);
+        else if (c === 'case2') case2Items.push(item);
+      }
+
+      exportedCount = case1Items.length + case2Items.length;
+      if (exportedCount === 0) {
+        return res.status(400).json({
+          error:
+            'Для выбранного оборудования накладная не требуется (для Кейса 3 и позиций без кейса списания накладная не оформляется).',
+        });
+      }
+
+      buffer = await generateMixedInvoicesDocx(case1Items, case2Items, {
+        invoiceNumber: String(invoiceNumber),
+        invoiceDate,
+        sender: String(sender),
+        recipient: String(recipient),
+        note: String(note),
       });
+
+      asciiFilename =
+        case1Items.length > 0 && case2Items.length > 0
+          ? `nakladnye-gruppa-${dateTag}.docx`
+          : case2Items.length > 0
+          ? `nakladnaya-forma-434-${dateTag}.docx`
+          : `nakladnaya-CIT-0501460-${dateTag}.docx`;
     }
 
-    const isLowValue = caseTypeParam === 'case2' || (caseTypeParam === 'auto' && allLowValue);
-
-    const buffer = isLowValue
-      ? await generateLowValueInvoiceDocx(formatted, {
-          invoiceNumber: String(invoiceNumber),
-          invoiceDate,
-          department: String(sender),
-        })
-      : await generateTransferInvoiceDocx(formatted, {
-          invoiceNumber: String(invoiceNumber),
-          invoiceDate,
-          sender: String(sender),
-          recipient: String(recipient),
-          note: String(note),
-        });
-
-    const dateTag = new Date().toISOString().slice(0, 10);
-    const asciiFilename = isLowValue
-      ? `nakladnaya-forma-434-${dateTag}.docx`
-      : `nakladnaya-CIT-0501460-${dateTag}.docx`;
     res.setHeader(
       'Content-Type',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -4074,8 +4150,8 @@ async function handleGenerateInvoiceRequest(req: any, res: any) {
       entityType: 'equipment',
       entityId: ids.join(','),
       entityLabel: asciiFilename,
-      summary: `Сформирована накладная списания (${orderedItems.length} ед.)`,
-      details: { filename: asciiFilename, count: orderedItems.length, equipmentIds: ids },
+      summary: `Сформирована накладная списания (${exportedCount} ед.)`,
+      details: { filename: asciiFilename, count: exportedCount, equipmentIds: ids },
     });
 
     res.send(buffer);

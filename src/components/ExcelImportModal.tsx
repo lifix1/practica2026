@@ -485,7 +485,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                   disabled={loading}
                   className="px-3.5 py-1.5 text-xs font-bold bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white rounded-xl"
                 >
-                  Добавить как дубликаты (-2, -3)
+                  Добавить как дубликаты (сохранить инв. номер)
                 </button>
               </div>
             </div>

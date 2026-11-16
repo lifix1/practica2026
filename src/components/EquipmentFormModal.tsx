@@ -69,8 +69,8 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
       setAdditionalFieldsValues({
         status: 'Действует',
         condition: 'Рабочее',
-        accounting_category: 'Дорогостоящее',
-        precious_metals: false,
+        accounting_category: '',
+        precious_metals: '',
         is_under_warranty: false,
         ...(initialData.additional_fields || {}),
       });
@@ -87,8 +87,8 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
       setAdditionalFieldsValues({
         status: 'Действует',
         condition: 'Рабочее',
-        accounting_category: 'Дорогостоящее',
-        precious_metals: false,
+        accounting_category: '',
+        precious_metals: '',
         is_under_warranty: false,
       });
     }
@@ -208,6 +208,12 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
     const qty = Number(additionalFieldsValues.quantity ?? 1);
     if (!Number.isInteger(qty) || qty < 1) {
       validationErrors.push('Поле «Количество (шт.)» должно быть целым числом не меньше 1.');
+    }
+    if (!additionalFieldsValues.accounting_category) {
+      validationErrors.push('Выберите обязательное поле «Категория (по бухучету)».');
+    }
+    if (typeof additionalFieldsValues.precious_metals !== 'boolean') {
+      validationErrors.push('Укажите обязательное поле «Содержание драгметаллов» (Да или Нет).');
     }
 
     if (additionalFieldsValues.dimensions && String(additionalFieldsValues.dimensions).trim()) {
@@ -564,13 +570,15 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Категория (по бухучету)
+                  Категория (по бухучету) *
                 </label>
                 <select
-                  value={additionalFieldsValues.accounting_category || 'Дорогостоящее'}
+                  value={additionalFieldsValues.accounting_category || ''}
                   onChange={(e) => handleDynamicFieldChange('accounting_category', e.target.value)}
-                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none bg-white"
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none bg-white focus:ring-2 focus:ring-blue-500"
+                  required
                 >
+                  <option value="">Выберите категорию...</option>
                   <option value="Дорогостоящее">Дорогостоящее</option>
                   <option value="Малоценка">Малоценка</option>
                   <option value="Мягкий инвентарь">Мягкий инвентарь</option>
@@ -579,15 +587,30 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Содержание драгметаллов
+                  Содержание драгметаллов *
                 </label>
                 <select
-                  value={additionalFieldsValues.precious_metals ? 'true' : 'false'}
-                  onChange={(e) =>
-                    handleDynamicFieldChange('precious_metals', e.target.value === 'true')
+                  value={
+                    additionalFieldsValues.precious_metals === true
+                      ? 'true'
+                      : additionalFieldsValues.precious_metals === false
+                      ? 'false'
+                      : ''
                   }
-                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none bg-white"
+                  onChange={(e) =>
+                    handleDynamicFieldChange(
+                      'precious_metals',
+                      e.target.value === 'true'
+                        ? true
+                        : e.target.value === 'false'
+                        ? false
+                        : ''
+                    )
+                  }
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none bg-white focus:ring-2 focus:ring-blue-500"
+                  required
                 >
+                  <option value="">Выберите значение...</option>
                   <option value="false">Нет</option>
                   <option value="true">Да</option>
                 </select>

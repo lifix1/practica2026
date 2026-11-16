@@ -360,7 +360,10 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
         body: JSON.stringify({ equipment_ids: selectedIds }),
       });
 
-      if (!res.ok) throw new Error('Ошибка генерации акта списания');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Ошибка генерации акта списания');
+      }
 
       const blob = await res.blob();
       const url = window.URL.createObjectURL(blob);
@@ -1101,7 +1104,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                 <th className="p-3">Габариты / Цвет</th>
                 <th className="p-3">Статус / Состояние</th>
                 <th className="p-3">Гарантия</th>
-                <th className="p-3">Ост. стоимость (BYN)</th>
+                <th className="p-3">Первоначальная стоимость (BYN)</th>
                 <th className="p-3 text-right">Действия</th>
               </tr>
             </thead>
@@ -1292,7 +1295,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                         )}
                       </td>
                       <td className="p-3 text-slate-800 whitespace-nowrap font-medium tabular-nums">
-                        {Number(item.residual_cost).toLocaleString('ru-RU', {
+                        {Number(item.initial_cost).toLocaleString('ru-RU', {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,
                         })}{' '}

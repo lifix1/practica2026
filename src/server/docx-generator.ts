@@ -488,15 +488,26 @@ export async function generateQrDocx(
   return await Packer.toBuffer(doc);
 }
 
+export function detectEquipmentWriteoffCase(item: {
+  additional_fields?: Record<string, any> | null;
+}): 'case1' | 'case2' | 'case3' | null {
+  const cat = String(item.additional_fields?.accounting_category || '').toLowerCase();
+  const hasDm = Boolean(item.additional_fields?.precious_metals);
+  if (cat.includes('малоцен') && hasDm) return 'case2';
+  if (cat.includes('малоцен') && !hasDm) return 'case3';
+  if (cat.includes('дорогостоящ') && hasDm) return 'case1';
+  return null;
+}
+
 /**
  * Case 1: «АКТ О СПИСАНИИ ИМУЩЕСТВА»
  * One separate Act section (A4 Landscape page) is generated for EACH equipment unit.
  */
-export async function generateWriteoffDocx(
+export function buildWriteoffCase1Sections(
   items: EquipmentForDocx[],
   actNumber: string,
   options: WriteoffDocxOptions = {}
-): Promise<Buffer> {
+) {
   const organization = options.organization || 'ВГУ имени П.М.Машерова';
   const defaultDate = options.actDate || options.writeoffDate || new Date();
   const reason = options.reason || 'начисленная амортизация составляет 100%';
@@ -1043,6 +1054,15 @@ export async function generateWriteoffDocx(
     };
   });
 
+  return sections;
+}
+
+export async function generateWriteoffDocx(
+  items: EquipmentForDocx[],
+  actNumber: string,
+  options: WriteoffDocxOptions = {}
+): Promise<Buffer> {
+  const sections = buildWriteoffCase1Sections(items, actNumber, options);
   const doc = new Document({ sections });
   return await Packer.toBuffer(doc);
 }
@@ -1052,10 +1072,10 @@ export async function generateWriteoffDocx(
  * Transfer to ЦИТ for recycling (supports multiple items spanning front and back of A4 sheet).
  * Kit components ("из комплекта" or is_kit_part) automatically omit cost columns (cols 6 & 7).
  */
-export async function generateTransferInvoiceDocx(
+export function buildTransferInvoiceCase1Sections(
   items: EquipmentForDocx[],
   options: TransferInvoiceOptions = {}
-): Promise<Buffer> {
+) {
   const organization = options.organization || 'ВГУ имени П.М.Машерова';
   const sender = options.sender || 'Кафедра ПиСП';
   const recipient = options.recipient || 'ЦИТ';
@@ -1560,42 +1580,47 @@ export async function generateTransferInvoiceDocx(
     ],
   });
 
-  const doc = new Document({
-    sections: [
-      {
-        properties: {
-          page: {
-            size: {
-              width: 11906,
-              height: 16838,
-              orientation: PageOrientation.PORTRAIT,
-            },
-            margin: { top: 550, bottom: 550, left: 700, right: 600 },
+  return [
+    {
+      properties: {
+        page: {
+          size: {
+            width: 11906,
+            height: 16838,
+            orientation: PageOrientation.PORTRAIT,
           },
+          margin: { top: 550, bottom: 550, left: 700, right: 600 },
         },
-        children: [
-          topHeaderTable,
-          partiesTable,
-          titleGrid,
-          makeTextParagraph('', { spacingBefore: 40, spacingAfter: 40 }),
-          mainTable,
-          footerNoteTable,
-          footerSignTable,
-          makeTextParagraph(
-            'В инвентарной карточке (книге) учета объектов основных средств выбытие отмечено.',
-            {
-              size: 16,
-              alignment: AlignmentType.LEFT,
-              spacingBefore: 80,
-              spacingAfter: 60,
-            }
-          ),
-          chiefAccountantTable,
-        ],
       },
-    ],
-  });
+      children: [
+        topHeaderTable,
+        partiesTable,
+        titleGrid,
+        makeTextParagraph('', { spacingBefore: 40, spacingAfter: 40 }),
+        mainTable,
+        footerNoteTable,
+        footerSignTable,
+        makeTextParagraph(
+          'В инвентарной карточке (книге) учета объектов основных средств выбытие отмечено.',
+          {
+            size: 16,
+            alignment: AlignmentType.LEFT,
+            spacingBefore: 80,
+            spacingAfter: 60,
+          }
+        ),
+        chiefAccountantTable,
+      ],
+    },
+  ];
+}
 
+export async function generateTransferInvoiceDocx(
+  items: EquipmentForDocx[],
+  options: TransferInvoiceOptions = {}
+): Promise<Buffer> {
+  const sections = buildTransferInvoiceCase1Sections(items, options);
+  const doc = new Document({ sections });
   return await Packer.toBuffer(doc);
 }
 
@@ -1807,10 +1832,10 @@ export interface LowValueInvoiceOptions {
  * Each equipment entry produces 2 A4 Portrait pages (front side + back side).
  * Sum column = Price (Цена) * Quantity (Количество).
  */
-export async function generateLowValueWriteoffActDocx(
+export function buildWriteoffCase2Sections(
   items: EquipmentForDocx[],
   options: WriteoffDocxOptions = {}
-): Promise<Buffer> {
+) {
   const defaultDate = options.writeoffDate || options.actDate || new Date();
   const { year: docYear } = extractCalendarYMD(defaultDate);
   const yearStr = String(docYear);
@@ -2300,6 +2325,14 @@ export async function generateLowValueWriteoffActDocx(
     };
   });
 
+  return sections;
+}
+
+export async function generateLowValueWriteoffActDocx(
+  items: EquipmentForDocx[],
+  options: WriteoffDocxOptions = {}
+): Promise<Buffer> {
+  const sections = buildWriteoffCase2Sections(items, options);
   const doc = new Document({ sections });
   return await Packer.toBuffer(doc);
 }
@@ -2309,10 +2342,10 @@ export async function generateLowValueWriteoffActDocx(
  * For «Малоценка» transfer / writeoff (supports multiple items and quantities > 1).
  * Sum = Price * Quantity.
  */
-export async function generateLowValueInvoiceDocx(
+export function buildLowValueInvoiceCase2Sections(
   items: EquipmentForDocx[],
   options: LowValueInvoiceOptions = {}
-): Promise<Buffer> {
+) {
   const organization = options.organization || 'ВГУ имени П.М. Машерова';
   const department = options.department || 'Кафедра ПиСП';
   const invoiceDateInput = options.invoiceDate || new Date();
@@ -2668,30 +2701,35 @@ export async function generateLowValueInvoiceDocx(
     ],
   });
 
-  const doc = new Document({
-    sections: [
-      {
-        properties: {
-          page: {
-            size: {
-              width: 11906,
-              height: 16838,
-              orientation: PageOrientation.PORTRAIT,
-            },
-            margin: { top: 450, bottom: 450, left: 600, right: 600 },
+  return [
+    {
+      properties: {
+        page: {
+          size: {
+            width: 11906,
+            height: 16838,
+            orientation: PageOrientation.PORTRAIT,
           },
+          margin: { top: 450, bottom: 450, left: 600, right: 600 },
         },
-        children: [
-          approvalHeaderTable,
-          infoAndCodesGrid,
-          mainTable,
-          makeTextParagraph('', { spacingBefore: 100, spacingAfter: 40 }),
-          footerSignTable,
-        ],
       },
-    ],
-  });
+      children: [
+        approvalHeaderTable,
+        infoAndCodesGrid,
+        mainTable,
+        makeTextParagraph('', { spacingBefore: 100, spacingAfter: 40 }),
+        footerSignTable,
+      ],
+    },
+  ];
+}
 
+export async function generateLowValueInvoiceDocx(
+  items: EquipmentForDocx[],
+  options: LowValueInvoiceOptions = {}
+): Promise<Buffer> {
+  const sections = buildLowValueInvoiceCase2Sections(items, options);
+  const doc = new Document({ sections });
   return await Packer.toBuffer(doc);
 }
 
@@ -2704,11 +2742,11 @@ export async function generateLowValueInvoiceDocx(
  * - Sum = Price * Quantity.
  * - Commission: А.И. Раловец, Д.А. Лукин, А.Г. Яцук, Т.Л. Русецкая, С.А. Ермоченко.
  */
-export async function generateLowValueNoDmWriteoffActDocx(
+export function buildWriteoffCase3Sections(
   items: EquipmentForDocx[],
   actNumber: string = '',
   options: WriteoffDocxOptions = {}
-): Promise<Buffer> {
+) {
   const defaultDate = options.writeoffDate || options.actDate || new Date();
   const { year: docYear } = extractCalendarYMD(defaultDate);
   const yearStr = String(docYear);
@@ -3198,100 +3236,163 @@ export async function generateLowValueNoDmWriteoffActDocx(
     rows: signRows,
   });
 
-  const doc = new Document({
-    sections: [
-      {
-        properties: {
-          page: {
-            size: {
-              width: 11906,
-              height: 16838,
-              orientation: PageOrientation.PORTRAIT,
-            },
-            margin: { top: 450, bottom: 450, left: 600, right: 600 },
+  return [
+    {
+      properties: {
+        page: {
+          size: {
+            width: 11906,
+            height: 16838,
+            orientation: PageOrientation.PORTRAIT,
           },
+          margin: { top: 450, bottom: 450, left: 600, right: 600 },
         },
-        children: [
-          // FRONT SIDE (Страница 1)
-          topBlock,
-          makeTextParagraph('', { spacingBefore: 40, spacingAfter: 20 }),
-          actNumberGrid,
-          makeTextParagraph('НА СПИСАНИЕ ОТДЕЛЬНЫХ ПРЕДМЕТОВ В СОСТАВЕ ОБОРОТНЫХ СРЕДСТВ', {
-            size: 17,
-            bold: true,
-            alignment: AlignmentType.CENTER,
-            spacingBefore: 20,
-            spacingAfter: 30,
-          }),
-          makeTextParagraph(`" ____ " _______________________ ${yearStr} г.`, {
-            size: 16,
-            alignment: AlignmentType.CENTER,
-            spacingAfter: 80,
-          }),
-          makeTextParagraph(
-            `Комиссия, назначенная приказом от   22   сентября ${yearStr} г.   №322   осмотрела принятые за _________________ г., находившиеся в эксплуатации малоценные и быстроизнашивающиеся предметы и признала их пришедшими в негодность и подлежащими сдаче в утиль`,
-            {
-              size: 15,
-              alignment: AlignmentType.LEFT,
-              spacingAfter: 80,
-            }
-          ),
-          metaTable,
-          frontItemsTable,
-
-          // PAGE BREAK TO REVERSE SIDE (Страница 2)
-          new Paragraph({ children: [new PageBreak()] }),
-
-          backContinuationTable,
-          makeTextParagraph('___________________________________________________________', {
-            size: 14,
-            alignment: AlignmentType.CENTER,
-            spacingBefore: 80,
-            spacingAfter: 0,
-          }),
-          makeTextParagraph('общее количество предметов прописью', {
-            size: 11,
-            italics: true,
-            alignment: AlignmentType.CENTER,
-            spacingAfter: 60,
-          }),
-          makeTextParagraph(
-            'Номера и даты актов выбытия ________________________________________________________________________',
-            {
-              size: 15,
-              alignment: AlignmentType.LEFT,
-              spacingAfter: 60,
-            }
-          ),
-          makeTextParagraph(
-            'Перечисленные в настоящем акте предметы в присутствии комиссии превращены в утиль, который подлежит оприходованию:',
-            {
-              size: 15,
-              alignment: AlignmentType.LEFT,
-              spacingAfter: 60,
-            }
-          ),
-          scrapTable,
-          makeTextParagraph('Утиль, не подлежащий учету, уничтожен.', {
-            size: 15,
-            spacingBefore: 70,
-            spacingAfter: 70,
-          }),
-          backSignTable,
-          makeTextParagraph(
-            `Утиль по накладной № ____________________  сдан   " ___ " ___________________ ${yearStr} г.`,
-            {
-              size: 15,
-              alignment: AlignmentType.LEFT,
-              spacingBefore: 160,
-            }
-          ),
-        ],
       },
-    ],
-  });
+      children: [
+        // FRONT SIDE (Страница 1)
+        topBlock,
+        makeTextParagraph('', { spacingBefore: 40, spacingAfter: 20 }),
+        actNumberGrid,
+        makeTextParagraph('НА СПИСАНИЕ ОТДЕЛЬНЫХ ПРЕДМЕТОВ В СОСТАВЕ ОБОРОТНЫХ СРЕДСТВ', {
+          size: 17,
+          bold: true,
+          alignment: AlignmentType.CENTER,
+          spacingBefore: 20,
+          spacingAfter: 30,
+        }),
+        makeTextParagraph(`" ____ " _______________________ ${yearStr} г.`, {
+          size: 16,
+          alignment: AlignmentType.CENTER,
+          spacingAfter: 80,
+        }),
+        makeTextParagraph(
+          `Комиссия, назначенная приказом от   22   сентября ${yearStr} г.   №322   осмотрела принятые за _________________ г., находившиеся в эксплуатации малоценные и быстроизнашивающиеся предметы и признала их пришедшими в негодность и подлежащими сдаче в утиль`,
+          {
+            size: 15,
+            alignment: AlignmentType.LEFT,
+            spacingAfter: 80,
+          }
+        ),
+        metaTable,
+        frontItemsTable,
 
+        // PAGE BREAK TO REVERSE SIDE (Страница 2)
+        new Paragraph({ children: [new PageBreak()] }),
+
+        backContinuationTable,
+        makeTextParagraph('___________________________________________________________', {
+          size: 14,
+          alignment: AlignmentType.CENTER,
+          spacingBefore: 80,
+          spacingAfter: 0,
+        }),
+        makeTextParagraph('общее количество предметов прописью', {
+          size: 11,
+          italics: true,
+          alignment: AlignmentType.CENTER,
+          spacingAfter: 60,
+        }),
+        makeTextParagraph(
+          'Номера и даты актов выбытия ________________________________________________________________________',
+          {
+            size: 15,
+            alignment: AlignmentType.LEFT,
+            spacingAfter: 60,
+          }
+        ),
+        makeTextParagraph(
+          'Перечисленные в настоящем акте предметы в присутствии комиссии превращены в утиль, который подлежит оприходованию:',
+          {
+            size: 15,
+            alignment: AlignmentType.LEFT,
+            spacingAfter: 60,
+          }
+        ),
+        scrapTable,
+        makeTextParagraph('Утиль, не подлежащий учету, уничтожен.', {
+          size: 15,
+          spacingBefore: 70,
+          spacingAfter: 70,
+        }),
+        backSignTable,
+        makeTextParagraph(
+          `Утиль по накладной № ____________________  сдан   " ___ " ___________________ ${yearStr} г.`,
+          {
+            size: 15,
+            alignment: AlignmentType.LEFT,
+            spacingBefore: 160,
+          }
+        ),
+      ],
+    },
+  ];
+}
+
+export async function generateLowValueNoDmWriteoffActDocx(
+  items: EquipmentForDocx[],
+  actNumber: string = '',
+  options: WriteoffDocxOptions = {}
+): Promise<Buffer> {
+  const sections = buildWriteoffCase3Sections(items, actNumber, options);
+  const doc = new Document({ sections });
   return await Packer.toBuffer(doc);
 }
 
+/**
+ * Unified group generator: builds individual acts per item for Case 1 and Case 2,
+ * plus a common act table for Case 3 items, preserving each item's exact case form.
+ */
+export async function generateMixedWriteoffActsDocx(
+  case1Items: EquipmentForDocx[],
+  case2Items: EquipmentForDocx[],
+  case3Items: EquipmentForDocx[],
+  actNumber: string = '',
+  options: WriteoffDocxOptions = {}
+): Promise<Buffer> {
+  const sections = [
+    ...(case1Items.length > 0 ? buildWriteoffCase1Sections(case1Items, actNumber, options) : []),
+    ...(case2Items.length > 0 ? buildWriteoffCase2Sections(case2Items, options) : []),
+    ...(case3Items.length > 0 ? buildWriteoffCase3Sections(case3Items, actNumber, options) : []),
+  ];
+  const doc = new Document({ sections });
+  return await Packer.toBuffer(doc);
+}
 
+/**
+ * Unified invoice generator: builds ОКУД 0501460 for Case 1 items and Форма № 434 for Case 2 items.
+ */
+export async function generateMixedInvoicesDocx(
+  case1Items: EquipmentForDocx[],
+  case2Items: EquipmentForDocx[],
+  options: {
+    invoiceNumber?: string;
+    invoiceDate?: Date | string | null;
+    organization?: string;
+    sender?: string;
+    recipient?: string;
+    note?: string;
+  } = {}
+): Promise<Buffer> {
+  const sections = [
+    ...(case1Items.length > 0
+      ? buildTransferInvoiceCase1Sections(case1Items, {
+          invoiceNumber: options.invoiceNumber,
+          invoiceDate: options.invoiceDate,
+          organization: options.organization,
+          sender: options.sender,
+          recipient: options.recipient,
+          note: options.note,
+        })
+      : []),
+    ...(case2Items.length > 0
+      ? buildLowValueInvoiceCase2Sections(case2Items, {
+          invoiceNumber: options.invoiceNumber,
+          invoiceDate: options.invoiceDate,
+          organization: options.organization,
+          department: options.sender,
+        })
+      : []),
+  ];
+  const doc = new Document({ sections });
+  return await Packer.toBuffer(doc);
+}

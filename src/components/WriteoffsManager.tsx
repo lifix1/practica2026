@@ -85,7 +85,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
   const [items, setItems] = useState<Equipment[]>([]);
   const [loading, setLoading] = useState(false);
   const [filterState, setFilterState] = useState<string>('');
-  const [caseFilter, setCaseFilter] = useState<'ALL' | 'CASE_1' | 'CASE_2' | 'CASE_3'>('ALL');
+  const [caseFilter, setCaseFilter] = useState<'ALL' | 'CASE_1' | 'CASE_2' | 'CASE_3' | 'OTHER'>('ALL');
   const [docFormMode, setDocFormMode] = useState<'auto' | 'case1' | 'case2' | 'case3'>('auto');
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [downloadingAct, setDownloadingAct] = useState(false);
@@ -172,6 +172,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
     if (caseFilter === 'CASE_1') return detectItemCase(item) === 'CASE_1';
     if (caseFilter === 'CASE_2') return detectItemCase(item) === 'CASE_2';
     if (caseFilter === 'CASE_3') return detectItemCase(item) === 'CASE_3';
+    if (caseFilter === 'OTHER') return detectItemCase(item) === 'OTHER';
     return true;
   });
 
@@ -260,10 +261,11 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
         throw new Error(errJson.error || 'Ошибка генерации акта');
       }
       const blob = await res.blob();
-      triggerBlobDownload(
-        blob,
-        `akty-${caseType}-${ids.length}-poz-${docDate || 'today'}.docx`
-      );
+      const cd = res.headers.get('Content-Disposition') || '';
+      const fnMatch = cd.match(/filename="([^"]+)"/i);
+      const filename =
+        fnMatch?.[1] || `akty-${caseType}-${ids.length}-poz-${docDate || 'today'}.docx`;
+      triggerBlobDownload(blob, filename);
       setFeedbackMsg({
         type: 'success',
         text:
@@ -304,10 +306,11 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
         throw new Error(errJson.error || 'Ошибка генерации накладной');
       }
       const blob = await res.blob();
-      triggerBlobDownload(
-        blob,
-        `nakladnaya-${caseType}-${ids.length}-poz-${docDate || 'today'}.docx`
-      );
+      const cd = res.headers.get('Content-Disposition') || '';
+      const fnMatch = cd.match(/filename="([^"]+)"/i);
+      const filename =
+        fnMatch?.[1] || `nakladnaya-${caseType}-${ids.length}-poz-${docDate || 'today'}.docx`;
+      triggerBlobDownload(blob, filename);
       setFeedbackMsg({
         type: 'success',
         text: `Накладная на ${ids.length} поз. успешно сформирована и скачана!`,
@@ -345,11 +348,19 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
       if (!updateRes.ok) throw new Error(updateData.error || 'Ошибка списания оборудования');
 
       const selectedObjs = availableEquipment.filter((eq) => selectedEqIds.includes(eq.id));
+      const actEligibleIds =
+        docFormMode === 'auto'
+          ? selectedObjs.filter((eq) => detectItemCase(eq) !== 'OTHER').map((eq) => eq.id)
+          : [...selectedEqIds];
       const invoiceEligibleIds =
         docFormMode === 'case3'
           ? []
           : selectedObjs
-              .filter((eq) => docFormMode !== 'auto' || detectItemCase(eq) !== 'CASE_3')
+              .filter((eq) => {
+                if (docFormMode !== 'auto') return true;
+                const c = detectItemCase(eq);
+                return c === 'CASE_1' || c === 'CASE_2';
+              })
               .map((eq) => eq.id);
 
       const idsToExport = [...selectedEqIds];
@@ -357,13 +368,16 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
       setSelectedEqIds([]);
       await fetchItems();
 
-      if (downloadActAfter) {
-        await handleDownloadActForIds(idsToExport);
+      if (downloadActAfter && actEligibleIds.length > 0) {
+        await handleDownloadActForIds(actEligibleIds);
       }
       if (downloadInvoiceAfter && invoiceEligibleIds.length > 0) {
         await handleDownloadInvoiceForIds(invoiceEligibleIds);
       }
-      if (!downloadActAfter && (!downloadInvoiceAfter || invoiceEligibleIds.length === 0)) {
+      if (
+        (!downloadActAfter || actEligibleIds.length === 0) &&
+        (!downloadInvoiceAfter || invoiceEligibleIds.length === 0)
+      ) {
         setFeedbackMsg({
           type: 'success',
           text: `Статус списания для ${idsToExport.length} ед. оборудования успешно обновлен!`,
@@ -564,7 +578,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
           <select
             value={caseFilter}
             onChange={(e) =>
-              setCaseFilter(e.target.value as 'ALL' | 'CASE_1' | 'CASE_2' | 'CASE_3')
+              setCaseFilter(e.target.value as 'ALL' | 'CASE_1' | 'CASE_2' | 'CASE_3' | 'OTHER')
             }
             className="w-full p-2 border border-slate-200 rounded-xl bg-slate-50 outline-none"
           >
@@ -572,6 +586,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
             <option value="CASE_1">Кейс 1: Дорогостоящее с ДМ</option>
             <option value="CASE_2">Кейс 2: Малоценка с ДМ</option>
             <option value="CASE_3">Кейс 3: Малоценка без ДМ</option>
+            <option value="OTHER">Без кейса для списания</option>
           </select>
         </div>
 
@@ -625,39 +640,61 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
             <span>Выбрано позиций: {selectedIds.length}</span>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => handleDownloadActForIds(selectedIds)}
-              disabled={downloadingAct}
-              className="px-3.5 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors inline-flex items-center gap-1.5"
-            >
-              <FileText className="w-3.5 h-3.5" />
-              {downloadingAct ? 'Генерация...' : `Акт списания (${selectedIds.length} поз.)`}
-            </button>
             {(() => {
               const selectedObjs = items.filter((it) => selectedIds.includes(it.id));
-              const allCase3Selected =
-                docFormMode === 'case3' ||
-                (docFormMode === 'auto' &&
-                  selectedObjs.length > 0 &&
-                  selectedObjs.every((it) => detectItemCase(it) === 'CASE_3'));
-              if (allCase3Selected) {
+              const actEligibleIds =
+                docFormMode === 'auto'
+                  ? selectedObjs.filter((it) => detectItemCase(it) !== 'OTHER').map((it) => it.id)
+                  : selectedIds;
+              const invoiceEligibleIds =
+                docFormMode === 'case3'
+                  ? []
+                  : docFormMode === 'auto'
+                  ? selectedObjs
+                      .filter((it) => {
+                        const c = detectItemCase(it);
+                        return c === 'CASE_1' || c === 'CASE_2';
+                      })
+                      .map((it) => it.id)
+                  : selectedIds;
+
+              if (actEligibleIds.length === 0) {
                 return (
-                  <span className="px-2.5 py-1.5 rounded-lg bg-teal-100 text-teal-800 text-[11px] font-semibold">
-                    Кейс 3 — без накладной
+                  <span className="px-2.5 py-1.5 rounded-lg bg-slate-200 text-slate-700 text-[11px] font-semibold">
+                    Нет кейса списания — документы не формируются
                   </span>
                 );
               }
+
               return (
-                <button
-                  onClick={() => handleDownloadInvoiceForIds(selectedIds)}
-                  disabled={downloadingInvoice}
-                  className="px-3.5 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors inline-flex items-center gap-1.5"
-                >
-                  <Truck className="w-3.5 h-3.5" />
-                  {downloadingInvoice
-                    ? 'Генерация...'
-                    : `Накладная (${selectedIds.length} поз.)`}
-                </button>
+                <>
+                  <button
+                    onClick={() => handleDownloadActForIds(actEligibleIds)}
+                    disabled={downloadingAct}
+                    className="px-3.5 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors inline-flex items-center gap-1.5"
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    {downloadingAct
+                      ? 'Генерация...'
+                      : `Акт списания (${actEligibleIds.length} поз.)`}
+                  </button>
+                  {invoiceEligibleIds.length === 0 ? (
+                    <span className="px-2.5 py-1.5 rounded-lg bg-teal-100 text-teal-800 text-[11px] font-semibold">
+                      Кейс 3 — без накладной
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => handleDownloadInvoiceForIds(invoiceEligibleIds)}
+                      disabled={downloadingInvoice}
+                      className="px-3.5 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors inline-flex items-center gap-1.5"
+                    >
+                      <Truck className="w-3.5 h-3.5" />
+                      {downloadingInvoice
+                        ? 'Генерация...'
+                        : `Накладная (${invoiceEligibleIds.length} поз.)`}
+                    </button>
+                  )}
+                </>
               );
             })()}
             {canManage && (
@@ -799,6 +836,11 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                             Кейс 3 (Малоценка без ДМ)
                           </span>
                         )}
+                        {detectedCase === 'OTHER' && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[10px] font-semibold border border-slate-200">
+                            Без кейса списания
+                          </span>
+                        )}
                         {kitPart && (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 text-[10px] font-semibold">
                             <Package className="w-3 h-3" />
@@ -849,28 +891,36 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                         : 'Готовится к списанию'}
                     </span>
 
-                    <button
-                      onClick={() => handleDownloadActForIds([item.id])}
-                      className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 rounded-lg text-xs font-semibold inline-flex items-center gap-1 transition-colors"
-                      title="Скачать Акт списания (автоматически выбирает форму Кейс 1, 2 или 3)"
-                    >
-                      <Download className="w-3.5 h-3.5 text-emerald-600" />
-                      Акт (.docx)
-                    </button>
+                    {(detectedCase !== 'OTHER' || docFormMode !== 'auto') ? (
+                      <>
+                        <button
+                          onClick={() => handleDownloadActForIds([item.id])}
+                          className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 rounded-lg text-xs font-semibold inline-flex items-center gap-1 transition-colors"
+                          title="Скачать Акт списания (автоматически выбирает форму Кейс 1, 2 или 3)"
+                        >
+                          <Download className="w-3.5 h-3.5 text-emerald-600" />
+                          Акт (.docx)
+                        </button>
 
-                    {detectedCase !== 'CASE_3' && (
-                      <button
-                        onClick={() => handleDownloadInvoiceForIds([item.id])}
-                        className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-800 rounded-lg text-xs font-semibold inline-flex items-center gap-1 transition-colors"
-                        title={
-                          detectedCase === 'CASE_2'
-                            ? 'Скачать Накладную-требование Форма № 434'
-                            : 'Скачать Накладную в ЦИТ (ОКУД 0501460)'
-                        }
-                      >
-                        <Truck className="w-3.5 h-3.5 text-blue-600" />
-                        {detectedCase === 'CASE_2' ? 'Форма 434' : 'ЦИТ'}
-                      </button>
+                        {detectedCase !== 'CASE_3' && docFormMode !== 'case3' && (
+                          <button
+                            onClick={() => handleDownloadInvoiceForIds([item.id])}
+                            className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 border border-blue-200 text-blue-800 rounded-lg text-xs font-semibold inline-flex items-center gap-1 transition-colors"
+                            title={
+                              detectedCase === 'CASE_2'
+                                ? 'Скачать Накладную-требование Форма № 434'
+                                : 'Скачать Накладную в ЦИТ (ОКУД 0501460)'
+                            }
+                          >
+                            <Truck className="w-3.5 h-3.5 text-blue-600" />
+                            {detectedCase === 'CASE_2' ? 'Форма 434' : 'ЦИТ'}
+                          </button>
+                        )}
+                      </>
+                    ) : (
+                      <span className="px-2.5 py-1 bg-slate-100 text-slate-500 rounded-lg text-[11px] font-medium">
+                        Документы не требуются
+                      </span>
                     )}
 
                     {canManage && item.writeoffState !== 'WRITTEN_OFF' && (
@@ -979,6 +1029,11 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                             {eqCase === 'CASE_3' && (
                               <span className="px-1.5 py-0.5 rounded bg-teal-100 text-teal-800 font-semibold">
                                 К3 (Без ДМ)
+                              </span>
+                            )}
+                            {eqCase === 'OTHER' && (
+                              <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-semibold">
+                                Без кейса
                               </span>
                             )}
                             {qty > 1 && (
