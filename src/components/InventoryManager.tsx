@@ -319,7 +319,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                           >
                             <div className="flex items-center gap-3 min-w-0">
                               <span className="font-mono font-bold bg-slate-100 text-slate-800 px-2 py-0.5 rounded text-[11px] shrink-0 tabular-nums">
-                                {item.inventory_number}
+                                {item.inventory_number || 'б/н'}
                               </span>
                               <div className="min-w-0">
                                 <button
@@ -329,7 +329,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                                   {item.name}
                                 </button>
                                 <div className="text-[11px] text-slate-500 mt-0.5">
-                                  {item.typeName} • Ауд. {item.roomNumber}
+                                  {item.typeName || 'Без типа'} • {item.roomNumber ? `Ауд. ${item.roomNumber}` : 'Без помещения'}
                                 </div>
                               </div>
                             </div>

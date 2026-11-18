@@ -103,7 +103,7 @@ export const TransfersManager: React.FC<TransfersManagerProps> = ({
               >
                 <div className="flex items-start gap-3">
                   <span className="font-mono font-bold bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded text-[11px] shrink-0 mt-0.5">
-                    {item.inventory_number}
+                    {item.inventory_number || 'б/н'}
                   </span>
                   <div>
                     <button
@@ -113,7 +113,7 @@ export const TransfersManager: React.FC<TransfersManagerProps> = ({
                       {item.name}
                     </button>
                     <div className="text-[11px] text-slate-500 mt-0.5">
-                      {item.typeName} • Базовая аудитория: № {item.roomNumber}
+                      {item.typeName || 'Без типа'} • Базовая аудитория: {item.roomNumber ? `№ ${item.roomNumber}` : 'не указана'}
                     </div>
                   </div>
                 </div>

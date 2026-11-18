@@ -68,7 +68,7 @@ export const NotificationPanel: React.FC<NotificationPanelProps> = ({
                         : 'Незначительная поломка'}
                     </span>
                     <span className="font-mono text-[10px] text-slate-500 font-semibold">
-                      {n.inventoryNumber}
+                      {n.inventoryNumber || 'б/н'}
                     </span>
                   </div>
                   <button

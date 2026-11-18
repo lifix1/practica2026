@@ -1770,7 +1770,7 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
     const heightMin = req.query.height_min ? Number(req.query.height_min) : undefined;
     const heightMax = req.query.height_max ? Number(req.query.height_max) : undefined;
 
-    // Fetch equipment items with joins
+    // Fetch equipment items with joins (leftJoin rooms/types so items without a room remain visible)
     let query = db
       .select({
         id: equipment.id,
@@ -1789,8 +1789,8 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
         writeoffDate: equipmentWriteoffs.writeoff_date,
       })
       .from(equipment)
-      .innerJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
-      .innerJoin(rooms, eq(equipment.room_id, rooms.id))
+      .leftJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
+      .leftJoin(rooms, eq(equipment.room_id, rooms.id))
       .leftJoin(equipmentWriteoffs, eq(equipment.id, equipmentWriteoffs.equipment_id))
       .$dynamic();
 
@@ -1845,7 +1845,9 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
       conditions.push(inArray(equipment.type_id, Array.from(targetTypeIds)));
     }
 
-    if (roomId && Number.isInteger(roomId) && roomId > 0) {
+    if (String(req.query.room_id || '').toUpperCase() === 'NONE') {
+      conditions.push(isNull(equipment.room_id));
+    } else if (roomId && Number.isInteger(roomId) && roomId > 0) {
       conditions.push(eq(equipment.room_id, roomId));
     }
 
@@ -1950,10 +1952,10 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
       });
     }
 
-    // Accounting Category filter (Дорогостоящее / Малоценка / Мягкий инвентарь)
+    // Accounting Category filter (Без категории / Дорогостоящее / Малоценка / Мягкий инвентарь)
     if (categoryFilter && categoryFilter !== 'ALL') {
       filtered = filtered.filter((item: any) => {
-        const itemCat = (item.additional_fields?.accounting_category || '').toLowerCase();
+        const itemCat = (item.additional_fields?.accounting_category || 'Без категории').toLowerCase();
         return itemCat === categoryFilter.toLowerCase();
       });
     }
@@ -2140,7 +2142,7 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
   try {
     const headers = [
       'Инвентарный номер',
-      'Наименование',
+      'Наименование (по бухгалтерии)',
       'Дата принятия к учету',
       'Первоначальная стоимость',
       'Остаточная стоимость',
@@ -2161,7 +2163,7 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
     const sampleRows = [
       {
         'Инвентарный номер': 'INV-2019-011',
-        'Наименование': 'Лазерный принтер HP LJ 1020 белый',
+        'Наименование (по бухгалтерии)': 'Лазерный принтер HP LJ 1020 белый',
         'Дата принятия к учету': '2019-04-12',
         'Первоначальная стоимость': 650.0,
         'Остаточная стоимость': 185.0,
@@ -2180,7 +2182,7 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
       },
       {
         'Инвентарный номер': 'INV-2021-045',
-        'Наименование': 'Центральный стол на 12 мест',
+        'Наименование (по бухгалтерии)': 'Центральный стол на 12 мест',
         'Дата принятия к учету': '2021-08-20',
         'Первоначальная стоимость': 1850.0,
         'Остаточная стоимость': 1200.0,
@@ -2199,7 +2201,7 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
       },
       {
         'Инвентарный номер': 'INV-2020-032',
-        'Наименование': 'Шкаф 3',
+        'Наименование (по бухгалтерии)': 'Шкаф 3',
         'Дата принятия к учету': '2020-11-15',
         'Первоначальная стоимость': 980.0,
         'Остаточная стоимость': 590.0,
@@ -2218,7 +2220,7 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
       },
       {
         'Инвентарный номер': 'INV-2024-007',
-        'Наименование': 'Компьютер преподавателя HP ProDesk',
+        'Наименование (по бухгалтерии)': 'Компьютер преподавателя HP ProDesk',
         'Дата принятия к учету': '2024-05-12',
         'Первоначальная стоимость': 2450.0,
         'Остаточная стоимость': 2100.0,
@@ -2237,7 +2239,7 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
       },
       {
         'Инвентарный номер': 'INV-2020-071',
-        'Наименование': 'Монитор рабочего места',
+        'Наименование (по бухгалтерии)': 'Монитор рабочего места',
         'Дата принятия к учету': '2020-03-10',
         'Первоначальная стоимость': 420.0,
         'Остаточная стоимость': 160.0,
@@ -2256,7 +2258,7 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
       },
       {
         'Инвентарный номер': 'INV-2022-194',
-        'Наименование': 'Кресло офисное подъёмно-поворотное',
+        'Наименование (по бухгалтерии)': 'Кресло офисное подъёмно-поворотное',
         'Дата принятия к учету': '2022-09-18',
         'Первоначальная стоимость': 290.0,
         'Остаточная стоимость': 165.0,
@@ -2292,6 +2294,288 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
   } catch (error: any) {
     console.error('Error generating Excel template:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Export selected equipment rows (from Equipment or Writeoffs tables) to XLSX
+// Must be registered BEFORE /api/equipment/:id
+app.post('/api/equipment/export-excel', requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const rawIds = req.body?.equipment_ids;
+    const source = req.body?.source === 'writeoff' ? 'writeoff' : 'equipment';
+
+    if (!Array.isArray(rawIds) || rawIds.length === 0) {
+      return res.status(400).json({ error: 'Выберите хотя бы одну строку для экспорта в Excel' });
+    }
+
+    const ids: number[] = [];
+    const seen = new Set<number>();
+    for (const val of rawIds) {
+      const n = Number(val);
+      if (Number.isInteger(n) && n > 0 && !seen.has(n)) {
+        seen.add(n);
+        ids.push(n);
+      }
+      if (ids.length >= 5000) break;
+    }
+
+    if (ids.length === 0) {
+      return res.status(400).json({ error: 'Переданы некорректные идентификаторы оборудования' });
+    }
+
+    const rows = await db
+      .select({
+        id: equipment.id,
+        inventory_number: equipment.inventory_number,
+        name: equipment.name,
+        type_id: equipment.type_id,
+        typeName: equipmentTypes.name,
+        room_id: equipment.room_id,
+        roomNumber: rooms.number,
+        roomFloor: rooms.floor,
+        recived: equipment.recived,
+        initial_cost: equipment.initial_cost,
+        residual_cost: equipment.residual_cost,
+        additional_fields: equipment.additional_fields,
+        writeoffState: equipmentWriteoffs.state,
+        writeoffDate: equipmentWriteoffs.writeoff_date,
+      })
+      .from(equipment)
+      .leftJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
+      .leftJoin(rooms, eq(equipment.room_id, rooms.id))
+      .leftJoin(equipmentWriteoffs, eq(equipment.id, equipmentWriteoffs.equipment_id))
+      .where(inArray(equipment.id, ids));
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Выбранное оборудование не найдено в базе данных' });
+    }
+
+    const rowById = new Map<number, any>(rows.map((r: any) => [r.id, r]));
+    const orderedRows: any[] = ids.map((id) => rowById.get(id)).filter((r): r is any => Boolean(r));
+    const isRegularUser = req.user?.role === 'USER';
+
+    const STANDARD_KEYS = new Set([
+      'location_place',
+      'dimensions',
+      'length_cm',
+      'width_cm',
+      'height_cm',
+      'description',
+      'color',
+      'status',
+      'condition',
+      'accounting_category',
+      'precious_metals',
+      'warranty_until',
+      'is_under_warranty',
+      'warranty_expired',
+      'warranty_status_ru',
+      'notes',
+      'quantity',
+      'is_kit_part',
+    ]);
+
+    const allDynamicDefs = await db.select().from(additionalFields);
+    const defByCode = new Map<string, any>();
+    for (const def of allDynamicDefs) {
+      if (!defByCode.has(def.code)) {
+        defByCode.set(def.code, def);
+      }
+    }
+
+    const extraCodesPresent: string[] = [];
+    const seenExtraCodes = new Set<string>();
+    for (const item of orderedRows) {
+      const af = item.additional_fields && typeof item.additional_fields === 'object' ? item.additional_fields : {};
+      for (const [code, val] of Object.entries(af)) {
+        if (STANDARD_KEYS.has(code) || seenExtraCodes.has(code)) continue;
+        const isEmpty =
+          val === undefined ||
+          val === null ||
+          val === '' ||
+          (Array.isArray(val) && val.length === 0);
+        if (!isEmpty) {
+          seenExtraCodes.add(code);
+          extraCodesPresent.push(code);
+        }
+      }
+    }
+
+    const formatIsoDate = (val: any): string => {
+      if (!val) return '';
+      if (typeof val === 'string') {
+        const prefix = val.trim().match(/^(\d{4}-\d{2}-\d{2})/);
+        if (prefix) return prefix[1];
+      }
+      const d = new Date(val);
+      return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+    };
+
+    const writeoffStateLabel = (state: string | null | undefined): string => {
+      if (state === 'PREPARING') return 'Готовится к списанию';
+      if (state === 'DOCUMENTS_PREPARATION') return 'Подготовка документов';
+      if (state === 'WRITTEN_OFF') return 'Списано с баланса';
+      return '';
+    };
+
+    const writeoffCaseLabel = (c: 'case1' | 'case2' | 'case3' | null): string => {
+      if (c === 'case1') return 'Кейс 1 (Дорогост. • ДМ)';
+      if (c === 'case2') return 'Кейс 2 (Малоценка • ДМ)';
+      if (c === 'case3') return 'Кейс 3 (Малоценка без ДМ)';
+      return 'Без кейса списания';
+    };
+
+    const baseHeaders = [
+      'ID',
+      'Инвентарный номер',
+      'Наименование (по бухгалтерии)',
+      'Тип оборудования',
+      'Помещение',
+      'Этаж',
+      'Место',
+      'Дата принятия к учету',
+      'Первоначальная стоимость',
+      'Остаточная стоимость',
+      'Количество',
+      'Размеры (Д*Ш*В), см',
+      'Цвет',
+      'Описание',
+      'Статус',
+      'Состояние',
+      'Категория (по бухучету)',
+      'Содержание драгметаллов',
+      'Гарантия истекает',
+      'Оборудование на гарантии',
+      'Примечание',
+    ];
+
+    if (!isRegularUser) {
+      baseHeaders.push('Статус списания', 'Дата списания');
+      if (source === 'writeoff') {
+        baseHeaders.push('Кейс списания');
+      }
+    }
+
+    const usedHeaderSet = new Set(baseHeaders);
+    const extraHeadersMap = new Map<string, string>();
+    for (const code of extraCodesPresent) {
+      const def = defByCode.get(code);
+      let candidate = def?.title ? String(def.title).trim() : code;
+      if (usedHeaderSet.has(candidate)) {
+        candidate = `${candidate} (${code})`;
+      }
+      usedHeaderSet.add(candidate);
+      extraHeadersMap.set(code, candidate);
+      baseHeaders.push(candidate);
+    }
+
+    const sheetRows = orderedRows.map((item: any) => {
+      const af = computeDynamicWarranty(item.additional_fields || {});
+      const qtyNum = Number(af.quantity);
+      const rowObj: Record<string, any> = {
+        'ID': item.id,
+        'Инвентарный номер': sanitizeSpreadsheetCell(item.inventory_number ?? ''),
+        'Наименование (по бухгалтерии)': sanitizeSpreadsheetCell(item.name ?? ''),
+        'Тип оборудования': sanitizeSpreadsheetCell(item.typeName || 'Без типа'),
+        'Помещение': sanitizeSpreadsheetCell(item.roomNumber ?? ''),
+        'Этаж': item.roomFloor !== null && item.roomFloor !== undefined ? Number(item.roomFloor) : '',
+        'Место': sanitizeSpreadsheetCell(af.location_place ?? ''),
+        'Дата принятия к учету': formatIsoDate(item.recived),
+        'Первоначальная стоимость':
+          item.initial_cost !== null && item.initial_cost !== undefined
+            ? Number(item.initial_cost)
+            : 0,
+        'Остаточная стоимость':
+          item.residual_cost !== null && item.residual_cost !== undefined
+            ? Number(item.residual_cost)
+            : '',
+        'Количество': Number.isFinite(qtyNum) && qtyNum > 0 ? qtyNum : 1,
+        'Размеры (Д*Ш*В), см': sanitizeSpreadsheetCell(af.dimensions ?? ''),
+        'Цвет': sanitizeSpreadsheetCell(af.color ?? ''),
+        'Описание': sanitizeSpreadsheetCell(af.description ?? ''),
+        'Статус': sanitizeSpreadsheetCell(af.status || 'Действует'),
+        'Состояние': sanitizeSpreadsheetCell(af.condition || 'Рабочее'),
+        'Категория (по бухучету)': sanitizeSpreadsheetCell(af.accounting_category || 'Без категории'),
+        'Содержание драгметаллов': af.precious_metals ? 'Да' : 'Нет',
+        'Гарантия истекает': formatIsoDate(af.warranty_until),
+        'Оборудование на гарантии': af.is_under_warranty ? 'Да' : 'Нет',
+        'Примечание': sanitizeSpreadsheetCell(af.notes ?? ''),
+      };
+
+      if (!isRegularUser) {
+        rowObj['Статус списания'] = writeoffStateLabel(item.writeoffState);
+        rowObj['Дата списания'] = formatIsoDate(item.writeoffDate);
+        if (source === 'writeoff') {
+          const detectedCase = detectEquipmentWriteoffCase(item);
+          rowObj['Кейс списания'] = writeoffCaseLabel(detectedCase);
+        }
+      }
+
+      for (const code of extraCodesPresent) {
+        const header = extraHeadersMap.get(code)!;
+        const val = af[code];
+        const def = defByCode.get(code);
+        if (val === undefined || val === null || val === '') {
+          rowObj[header] = '';
+        } else if (Array.isArray(val)) {
+          rowObj[header] = sanitizeSpreadsheetCell(val.join(', '));
+        } else if (def?.data_type === 'BOOLEAN' || typeof val === 'boolean') {
+          rowObj[header] = val === true || val === 'true' ? 'Да' : 'Нет';
+        } else if (
+          (def?.data_type === 'INTEGER' || def?.data_type === 'NUMBER') &&
+          typeof val === 'number' &&
+          Number.isFinite(val)
+        ) {
+          rowObj[header] = val;
+        } else {
+          rowObj[header] = sanitizeSpreadsheetCell(val);
+        }
+      }
+
+      return rowObj;
+    });
+
+    const ws = XLSX.utils.json_to_sheet(sheetRows, { header: baseHeaders });
+    ws['!cols'] = baseHeaders.map((h) => {
+      let maxLen = h.length;
+      for (const row of sheetRows) {
+        const len = String(row[h] ?? '').length;
+        if (len > maxLen) maxLen = len;
+      }
+      return { wch: Math.min(45, Math.max(12, maxLen + 3)) };
+    });
+
+    const wb = XLSX.utils.book_new();
+    const sheetName = source === 'writeoff' ? 'Списание' : 'Оборудование';
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    const dateTag = new Date().toISOString().slice(0, 10);
+    const filePrefix = source === 'writeoff' ? 'export-spisanie' : 'export-oborudovanie';
+
+    await logAuditEvent({
+      req,
+      action: 'EQUIPMENT_EXPORT_EXCEL',
+      category: source === 'writeoff' ? 'WRITEOFF' : 'EQUIPMENT',
+      severity: 'INFO',
+      entityType: source === 'writeoff' ? 'writeoff' : 'equipment',
+      entityLabel: `${sheetName} (${orderedRows.length} поз.)`,
+      summary: `Экспорт в Excel (${sheetName}): выгружено ${orderedRows.length} выбранных позиций`,
+      details: { source, count: orderedRows.length, equipmentIds: orderedRows.map((r: any) => r.id) },
+    });
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${filePrefix}-${dateTag}.xlsx"`
+    );
+    res.send(buffer);
+  } catch (error: any) {
+    console.error('Error exporting equipment to Excel:', error);
+    res.status(500).json({ error: error.message || 'Ошибка экспорта данных в Excel' });
   }
 });
 
@@ -2447,8 +2731,8 @@ app.get('/api/equipment/:id', async (req: AuthRequest, res, next) => {
         writeoffDate: equipmentWriteoffs.writeoff_date,
       })
       .from(equipment)
-      .innerJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
-      .innerJoin(rooms, eq(equipment.room_id, rooms.id))
+      .leftJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
+      .leftJoin(rooms, eq(equipment.room_id, rooms.id))
       .leftJoin(equipmentWriteoffs, eq(equipment.id, equipmentWriteoffs.equipment_id))
       .where(eq(equipment.id, eqId))
       .limit(1);
@@ -2552,6 +2836,19 @@ function formatEquipmentDbError(error: any): string {
   return 'Не удалось сохранить данные оборудования. Проверьте заполненные поля и повторите попытку.';
 }
 
+async function ensureDefaultEquipmentType(): Promise<{ id: number; name: string }> {
+  const allTypes = await db.select().from(equipmentTypes);
+  const existing = allTypes.find((t: any) => t.name.trim().toLowerCase() === 'без типа');
+  if (existing) {
+    return { id: Number(existing.id), name: existing.name };
+  }
+  const [created] = await db
+    .insert(equipmentTypes)
+    .values({ name: 'Без типа', parent_id: null })
+    .returning();
+  return { id: Number(created.id), name: created.name };
+}
+
 // Create Equipment (Admin only)
 app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
@@ -2567,25 +2864,32 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
     } = req.body;
 
     const formErrors: string[] = [];
-    const trimmedInv = String(inventory_number || '').trim();
+    const trimmedInv =
+      inventory_number === undefined || inventory_number === null
+        ? ''
+        : String(inventory_number).trim();
+    const finalInventoryNumber: string | null = trimmedInv || null;
     const trimmedName = String(name || '').trim();
-    const numericTypeId = Number(type_id);
-    const numericRoomId = Number(room_id);
-    const recivedDate = recived ? new Date(recived) : null;
 
-    if (!trimmedInv) {
-      formErrors.push('Укажите инвентарный номер оборудования.');
-    }
+    const hasTypeId = type_id !== undefined && type_id !== null && String(type_id).trim() !== '';
+    const numericTypeId = hasTypeId ? Number(type_id) : NaN;
+
+    const hasRoomId = room_id !== undefined && room_id !== null && String(room_id).trim() !== '';
+    const numericRoomId = hasRoomId ? Number(room_id) : null;
+
+    const hasRecived = recived !== undefined && recived !== null && String(recived).trim() !== '';
+    const recivedDate = hasRecived ? new Date(recived) : null;
+
     if (!trimmedName) {
       formErrors.push('Укажите наименование оборудования.');
     }
-    if (!type_id || !Number.isInteger(numericTypeId) || numericTypeId <= 0) {
-      formErrors.push('Выберите тип оборудования из списка.');
+    if (hasTypeId && (!Number.isInteger(numericTypeId) || numericTypeId <= 0)) {
+      formErrors.push('Выберите корректный тип оборудования из списка.');
     }
-    if (!room_id || !Number.isInteger(numericRoomId) || numericRoomId <= 0) {
-      formErrors.push('Выберите помещение (аудиторию).');
+    if (hasRoomId && (!Number.isInteger(numericRoomId) || numericRoomId! <= 0)) {
+      formErrors.push('Выберите корректное помещение (аудиторию).');
     }
-    if (!recivedDate || isNaN(recivedDate.getTime())) {
+    if (hasRecived && (!recivedDate || isNaN(recivedDate.getTime()))) {
       formErrors.push('Укажите корректную дату принятия к учёту.');
     }
 
@@ -2593,15 +2897,16 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       initial_cost === '' || initial_cost === undefined || initial_cost === null
         ? 0
         : Number(String(initial_cost).replace(',', '.'));
-    const parsedResidualCost =
-      residual_cost === '' || residual_cost === undefined || residual_cost === null
-        ? 0
-        : Number(String(residual_cost).replace(',', '.'));
+    const hasResidualCost =
+      residual_cost !== '' && residual_cost !== undefined && residual_cost !== null;
+    const parsedResidualCost = hasResidualCost
+      ? Number(String(residual_cost).replace(',', '.'))
+      : null;
 
     if (isNaN(parsedInitialCost) || parsedInitialCost < 0) {
       formErrors.push('Первоначальная стоимость должна быть неотрицательным числом (например: 1210.23).');
     }
-    if (isNaN(parsedResidualCost) || parsedResidualCost < 0) {
+    if (parsedResidualCost !== null && (isNaN(parsedResidualCost) || parsedResidualCost < 0)) {
       formErrors.push('Остаточная стоимость должна быть неотрицательным числом (например: 0.00).');
     }
 
@@ -2612,41 +2917,61 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       });
     }
 
-    // Verify referenced type & room exist
-    const [foundType] = await db
-      .select()
-      .from(equipmentTypes)
-      .where(eq(equipmentTypes.id, numericTypeId))
-      .limit(1);
-    if (!foundType) {
-      return res.status(400).json({
-        error: 'Выбранный тип оборудования не найден. Обновите страницу и выберите тип заново.',
-      });
+    // Verify referenced type & room exist (or resolve default 'Без типа' if type omitted)
+    let resolvedType: { id: number; name: string } | undefined;
+    if (hasTypeId) {
+      const [foundType] = await db
+        .select()
+        .from(equipmentTypes)
+        .where(eq(equipmentTypes.id, numericTypeId))
+        .limit(1);
+      if (!foundType) {
+        return res.status(400).json({
+          error: 'Выбранный тип оборудования не найден. Обновите страницу и выберите тип заново.',
+        });
+      }
+      resolvedType = { id: Number(foundType.id), name: foundType.name };
+    } else {
+      resolvedType = await ensureDefaultEquipmentType();
     }
 
-    const [foundRoom] = await db
-      .select()
-      .from(rooms)
-      .where(eq(rooms.id, numericRoomId))
-      .limit(1);
-    if (!foundRoom) {
-      return res.status(400).json({
-        error: 'Выбранное помещение не найдено. Обновите страницу и выберите аудиторию заново.',
-      });
+    if (numericRoomId !== null) {
+      const [foundRoom] = await db
+        .select()
+        .from(rooms)
+        .where(eq(rooms.id, numericRoomId))
+        .limit(1);
+      if (!foundRoom) {
+        return res.status(400).json({
+          error: 'Выбранное помещение не найдено. Обновите страницу и выберите аудиторию заново.',
+        });
+      }
     }
 
     const afObj = additional_fields || {};
-    const allowedCategories = ['Дорогостоящее', 'Малоценка', 'Мягкий инвентарь'];
-    if (!afObj.accounting_category || !allowedCategories.includes(String(afObj.accounting_category))) {
-      formErrors.push('Выберите обязательное поле «Категория (по бухучету)».');
+    const allowedCategories = ['Без категории', 'Дорогостоящее', 'Малоценка', 'Мягкий инвентарь'];
+    const rawCat =
+      afObj.accounting_category === undefined ||
+      afObj.accounting_category === null ||
+      String(afObj.accounting_category).trim() === ''
+        ? 'Без категории'
+        : String(afObj.accounting_category).trim();
+    if (!allowedCategories.includes(rawCat)) {
+      formErrors.push('Укажите корректную категорию (по бухучету).');
     }
+
     const pmVal = afObj.precious_metals;
-    if (
-      typeof pmVal !== 'boolean' &&
-      pmVal !== 'true' &&
-      pmVal !== 'false'
-    ) {
-      formErrors.push('Укажите обязательное поле «Содержание драгметаллов» (Да или Нет).');
+    let normalizedPm = false;
+    if (pmVal !== undefined && pmVal !== null && pmVal !== '') {
+      if (typeof pmVal === 'boolean') {
+        normalizedPm = pmVal;
+      } else if (pmVal === 'true' || pmVal === '1') {
+        normalizedPm = true;
+      } else if (pmVal === 'false' || pmVal === '0') {
+        normalizedPm = false;
+      } else {
+        formErrors.push('Укажите корректное значение для поля «Содержание драгметаллов» (Да или Нет).');
+      }
     }
 
     if (formErrors.length > 0) {
@@ -2658,13 +2983,17 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
 
     // Validate additional fields
     const normalizedInputFields = {
+      status: 'Действует',
+      condition: 'Рабочее',
+      quantity: 1,
       ...afObj,
-      precious_metals: pmVal === true || pmVal === 'true',
+      accounting_category: rawCat,
+      precious_metals: normalizedPm,
     };
     const validation = await validateAdditionalFields(
-      numericTypeId,
+      resolvedType.id,
       normalizedInputFields,
-      { typeName: foundType.name }
+      { typeName: resolvedType.name }
     );
 
     if (!validation.isValid) {
@@ -2679,17 +3008,19 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
     const [created] = await db
       .insert(equipment)
       .values({
-        inventory_number: trimmedInv,
+        inventory_number: finalInventoryNumber,
         name: trimmedName,
-        type_id: numericTypeId,
-        recived: recivedDate!,
+        type_id: resolvedType.id,
+        recived: recivedDate,
         initial_cost: Math.round(parsedInitialCost * 100) / 100,
-        residual_cost: Math.round(parsedResidualCost * 100) / 100,
+        residual_cost:
+          parsedResidualCost === null ? null : Math.round(parsedResidualCost * 100) / 100,
         room_id: numericRoomId,
         additional_fields: normalizedFields,
       })
       .returning();
 
+    const invLabel = created.inventory_number || 'б/н';
     await logAuditEvent({
       req,
       action: 'EQUIPMENT_CREATE',
@@ -2697,12 +3028,12 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       severity: 'INFO',
       entityType: 'equipment',
       entityId: created.id,
-      entityLabel: `${created.inventory_number} — ${created.name}`,
-      summary: `Добавлено оборудование «${created.name}» (инв. № ${created.inventory_number})`,
+      entityLabel: `${invLabel} — ${created.name}`,
+      summary: `Добавлено оборудование «${created.name}» (${created.inventory_number ? `инв. № ${created.inventory_number}` : 'без инв. №'})`,
       details: {
         id: created.id,
         inventory_number: created.inventory_number,
-        typeName: foundType.name,
+        typeName: resolvedType.name,
         room_id: created.room_id,
         initial_cost: created.initial_cost,
       },
@@ -2750,33 +3081,37 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
     } = req.body;
 
     const formErrors: string[] = [];
-    const effectiveTypeId = type_id !== undefined ? Number(type_id) : existingItem.type_id;
+    const hasTypeIdProvided = type_id !== undefined && type_id !== null && String(type_id).trim() !== '';
+    let effectiveTypeId = hasTypeIdProvided ? Number(type_id) : existingItem.type_id;
 
-    if (inventory_number !== undefined && !String(inventory_number).trim()) {
-      formErrors.push('Инвентарный номер не может быть пустым.');
-    }
     if (name !== undefined && !String(name).trim()) {
       formErrors.push('Наименование оборудования не может быть пустым.');
     }
-    if (type_id !== undefined && (!Number.isInteger(effectiveTypeId) || effectiveTypeId <= 0)) {
+    if (hasTypeIdProvided && (!Number.isInteger(effectiveTypeId) || effectiveTypeId <= 0)) {
       formErrors.push('Выберите корректный тип оборудования.');
     }
-    if (room_id !== undefined && (!Number.isInteger(Number(room_id)) || Number(room_id) <= 0)) {
+
+    const hasRoomIdProvided =
+      room_id !== undefined && room_id !== null && String(room_id).trim() !== '';
+    if (hasRoomIdProvided && (!Number.isInteger(Number(room_id)) || Number(room_id) <= 0)) {
       formErrors.push('Выберите корректное помещение (аудиторию).');
     }
-    if (recived !== undefined) {
+
+    const hasRecivedProvided =
+      recived !== undefined && recived !== null && String(recived).trim() !== '';
+    if (hasRecivedProvided) {
       const parsedDate = new Date(recived);
-      if (!recived || isNaN(parsedDate.getTime())) {
+      if (isNaN(parsedDate.getTime())) {
         formErrors.push('Укажите корректную дату принятия к учёту.');
       }
     }
-    if (initial_cost !== undefined && initial_cost !== '') {
+    if (initial_cost !== undefined && initial_cost !== '' && initial_cost !== null) {
       const c = Number(String(initial_cost).replace(',', '.'));
       if (isNaN(c) || c < 0) {
         formErrors.push('Первоначальная стоимость должна быть неотрицательным числом.');
       }
     }
-    if (residual_cost !== undefined && residual_cost !== '') {
+    if (residual_cost !== undefined && residual_cost !== '' && residual_cost !== null) {
       const c = Number(String(residual_cost).replace(',', '.'));
       if (isNaN(c) || c < 0) {
         formErrors.push('Остаточная стоимость должна быть неотрицательным числом.');
@@ -2790,42 +3125,70 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
       });
     }
 
+    let normalizedAfPayload: Record<string, any> | undefined;
     if (additional_fields !== undefined) {
       const afObj = additional_fields || {};
-      if (
-        Object.prototype.hasOwnProperty.call(afObj, 'accounting_category') &&
-        !['Дорогостоящее', 'Малоценка', 'Мягкий инвентарь'].includes(
-          String(afObj.accounting_category || '')
-        )
-      ) {
+      const allowedCategories = ['Без категории', 'Дорогостоящее', 'Малоценка', 'Мягкий инвентарь'];
+      const normalizedCat =
+        !Object.prototype.hasOwnProperty.call(afObj, 'accounting_category') ||
+        afObj.accounting_category === '' ||
+        afObj.accounting_category === null ||
+        afObj.accounting_category === undefined
+          ? 'Без категории'
+          : String(afObj.accounting_category).trim();
+
+      if (!allowedCategories.includes(normalizedCat)) {
         return res.status(400).json({
-          error: 'Выберите обязательное поле «Категория (по бухучету)».',
+          error: 'Укажите корректную категорию (по бухучету).',
         });
       }
+
+      let normalizedPm: any = afObj.precious_metals;
       if (
-        Object.prototype.hasOwnProperty.call(afObj, 'precious_metals') &&
+        !Object.prototype.hasOwnProperty.call(afObj, 'precious_metals') ||
+        afObj.precious_metals === '' ||
+        afObj.precious_metals === null ||
+        afObj.precious_metals === undefined
+      ) {
+        normalizedPm = false;
+      } else if (
         typeof afObj.precious_metals !== 'boolean' &&
         afObj.precious_metals !== 'true' &&
         afObj.precious_metals !== 'false'
       ) {
         return res.status(400).json({
-          error: 'Укажите обязательное поле «Содержание драгметаллов» (Да или Нет).',
+          error: 'Укажите корректное значение для поля «Содержание драгметаллов» (Да или Нет).',
+        });
+      } else {
+        normalizedPm = afObj.precious_metals === true || afObj.precious_metals === 'true';
+      }
+
+      normalizedAfPayload = {
+        ...afObj,
+        accounting_category: normalizedCat,
+        precious_metals: normalizedPm,
+      };
+    }
+
+    let resolvedType: { id: number; name: string };
+    if (type_id !== undefined && (type_id === null || String(type_id).trim() === '')) {
+      resolvedType = await ensureDefaultEquipmentType();
+      effectiveTypeId = resolvedType.id;
+    } else {
+      const [foundType] = await db
+        .select()
+        .from(equipmentTypes)
+        .where(eq(equipmentTypes.id, effectiveTypeId))
+        .limit(1);
+      if (!foundType) {
+        return res.status(400).json({
+          error: 'Выбранный тип оборудования не найден в справочнике.',
         });
       }
+      resolvedType = { id: Number(foundType.id), name: foundType.name };
     }
 
-    const [foundType] = await db
-      .select()
-      .from(equipmentTypes)
-      .where(eq(equipmentTypes.id, effectiveTypeId))
-      .limit(1);
-    if (!foundType) {
-      return res.status(400).json({
-        error: 'Выбранный тип оборудования не найден в справочнике.',
-      });
-    }
-
-    if (room_id !== undefined) {
+    if (hasRoomIdProvided) {
       const [foundRoom] = await db
         .select()
         .from(rooms)
@@ -2839,16 +3202,16 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
     }
 
     // Validate additional fields if provided
-    if (additional_fields !== undefined) {
+    if (normalizedAfPayload !== undefined) {
       const preservedKeys = Object.keys(
         (existingItem.additional_fields as Record<string, any>) || {}
       );
       const validation = await validateAdditionalFields(
         effectiveTypeId,
-        additional_fields,
+        normalizedAfPayload,
         {
           preservedKeys,
-          typeName: foundType.name,
+          typeName: resolvedType.name,
         }
       );
       if (!validation.isValid) {
@@ -2860,21 +3223,35 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
     }
 
     const updateData: any = {};
-    if (inventory_number !== undefined) updateData.inventory_number = String(inventory_number).trim();
+    if (inventory_number !== undefined) {
+      const trimmed = inventory_number === null ? '' : String(inventory_number).trim();
+      updateData.inventory_number = trimmed || null;
+    }
     if (name !== undefined) updateData.name = String(name).trim();
     if (type_id !== undefined) updateData.type_id = effectiveTypeId;
-    if (recived !== undefined) updateData.recived = new Date(recived);
+    if (recived !== undefined) {
+      updateData.recived = hasRecivedProvided ? new Date(recived) : null;
+    }
     if (initial_cost !== undefined) {
-      const val = initial_cost === '' || initial_cost === null ? 0 : Number(String(initial_cost).replace(',', '.'));
+      const val =
+        initial_cost === '' || initial_cost === null
+          ? 0
+          : Number(String(initial_cost).replace(',', '.'));
       updateData.initial_cost = Math.round(val * 100) / 100;
     }
     if (residual_cost !== undefined) {
-      const val = residual_cost === '' || residual_cost === null ? 0 : Number(String(residual_cost).replace(',', '.'));
-      updateData.residual_cost = Math.round(val * 100) / 100;
+      if (residual_cost === '' || residual_cost === null) {
+        updateData.residual_cost = null;
+      } else {
+        const val = Number(String(residual_cost).replace(',', '.'));
+        updateData.residual_cost = Math.round(val * 100) / 100;
+      }
     }
-    if (room_id !== undefined) updateData.room_id = Number(room_id);
-    if (additional_fields !== undefined) {
-      updateData.additional_fields = prepareAdditionalFieldsForStorage(additional_fields);
+    if (room_id !== undefined) {
+      updateData.room_id = hasRoomIdProvided ? Number(room_id) : null;
+    }
+    if (normalizedAfPayload !== undefined) {
+      updateData.additional_fields = prepareAdditionalFieldsForStorage(normalizedAfPayload);
     }
 
     const [updated] = await db
@@ -2891,7 +3268,7 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
       severity: 'INFO',
       entityType: 'equipment',
       entityId: updated.id,
-      entityLabel: `${updated.inventory_number} — ${updated.name}`,
+      entityLabel: `${updated.inventory_number || 'б/н'} — ${updated.name}`,
       summary: `Обновлена карточка оборудования «${updated.name}» (${changedKeys.length} изм.)`,
       details: {
         changedFields: changedKeys,
@@ -3036,15 +3413,15 @@ app.post('/api/equipment/qr-docx', requireAuth, requireRole('ADMIN', 'ENGINEER')
         recived: equipment.recived,
       })
       .from(equipment)
-      .innerJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
-      .innerJoin(rooms, eq(equipment.room_id, rooms.id))
+      .leftJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
+      .leftJoin(rooms, eq(equipment.room_id, rooms.id))
       .where(inArray(equipment.id, ids));
 
     const baseUrl = getPublicBaseUrl(req);
     const formatted = items.map((i: any) => ({
       ...i,
       qrCode: encodeEquipmentQrToken(i.id),
-      recivedDate: new Date(i.recived).toLocaleDateString('ru-RU'),
+      recivedDate: i.recived ? new Date(i.recived).toLocaleDateString('ru-RU') : '—',
     }));
 
     const docxBuffer = await generateQrDocx(formatted, baseUrl, { qrSizeCm });
@@ -3094,7 +3471,7 @@ app.post('/api/equipment/qr-group', requireAuth, requireRole('ADMIN', 'ENGINEER'
         roomNumber: rooms.number,
       })
       .from(equipment)
-      .innerJoin(rooms, eq(equipment.room_id, rooms.id))
+      .leftJoin(rooms, eq(equipment.room_id, rooms.id))
       .where(inArray(equipment.id, ids));
 
     if (items.length === 0) {
@@ -3104,9 +3481,10 @@ app.post('/api/equipment/qr-group', requireAuth, requireRole('ADMIN', 'ENGINEER'
     const randomSuffix = Math.floor(1000 + Math.random() * 9000);
     const year = new Date().getFullYear();
     const code = `GRP-${year}-${randomSuffix}`;
+    const roomSuffix = items[0].roomNumber ? ` — ауд. ${items[0].roomNumber}` : '';
     const autoName = name && name.trim()
       ? name.trim()
-      : `Комплект: ${items.length} шт. («${items[0].name}»${items.length > 1 ? ` и др. — ауд. ${items[0].roomNumber}` : ''})`;
+      : `Комплект: ${items.length} шт. («${items[0].name}»${items.length > 1 ? ` и др.${roomSuffix}` : ''})`;
 
     const [batch] = await db
       .insert(equipmentBatches)
@@ -3172,8 +3550,8 @@ app.get('/api/equipment/qr-group/:code', requireAuth, async (req: AuthRequest, r
             recived: equipment.recived,
           })
           .from(equipment)
-          .innerJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
-          .innerJoin(rooms, eq(equipment.room_id, rooms.id))
+          .leftJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
+          .leftJoin(rooms, eq(equipment.room_id, rooms.id))
           .where(inArray(equipment.id, ids))
       : [];
 
@@ -3225,8 +3603,8 @@ app.get('/api/equipment/qr-group/:code/docx', requireAuth, requireRole('ADMIN', 
             recived: equipment.recived,
           })
           .from(equipment)
-          .innerJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
-          .innerJoin(rooms, eq(equipment.room_id, rooms.id))
+          .leftJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
+          .leftJoin(rooms, eq(equipment.room_id, rooms.id))
           .where(inArray(equipment.id, ids))
       : [];
 
@@ -3493,7 +3871,7 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
     const newRoomsCreated: string[] = [];
     const newTypesCreated: string[] = [];
 
-    // Fetch existing equipment items for duplicate detection
+    // Fetch existing equipment items for duplicate detection (leftJoin rooms so items without room are included)
     const existingEquipmentRows = await db
       .select({
         id: equipment.id,
@@ -3502,7 +3880,7 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         roomNumber: rooms.number,
       })
       .from(equipment)
-      .innerJoin(rooms, eq(equipment.room_id, rooms.id));
+      .leftJoin(rooms, eq(equipment.room_id, rooms.id));
 
     type ExistingRecord = {
       id: number;
@@ -3513,7 +3891,6 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
 
     const existingByInv = new Map<string, ExistingRecord>();
     const existingByNameRoom = new Map<string, ExistingRecord>();
-    const usedInvNumsLower = new Set<string>();
 
     for (const r of existingEquipmentRows as any[]) {
       const invClean = String(r.inventory_number || '').trim();
@@ -3523,9 +3900,8 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         name: String(r.name || ''),
         roomNumber: String(r.roomNumber || ''),
       };
-      if (invClean) {
+      if (invClean && !existingByInv.has(invClean.toLowerCase())) {
         existingByInv.set(invClean.toLowerCase(), rec);
-        usedInvNumsLower.add(invClean.toLowerCase());
       }
       const nrKey = `${rec.name.trim().toLowerCase()}||${rec.roomNumber.trim().toLowerCase()}`;
       if (!existingByNameRoom.has(nrKey)) {
@@ -3536,13 +3912,13 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
     interface ParsedImportRow {
       rowIndex: number;
       rawInvNum: string;
-      invNum: string;
+      invNum: string | null;
       name: string;
       cleanRoomStr: string;
       typeNameRaw: string;
-      recivedDate: Date;
+      recivedDate: Date | null;
       initialCost: number;
-      residualCost: number;
+      residualCost: number | null;
       additional_fields: Record<string, any>;
       matchedExisting: ExistingRecord | null;
       matchReason: string | null;
@@ -3590,14 +3966,20 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         'Инв. №',
         '№ п/п'
       );
-      let invNum = rawInvNum;
-      let name = getVal(
-        'name',
+      const name = getVal(
         'Наименование (по бухгалтерии)',
         'Наименование',
         'Наименование объекта',
+        'name',
         'Название'
       );
+      if (!name) {
+        errors.push(
+          `Строка ${index + 1}: не заполнено обязательное поле «Наименование (по бухгалтерии)»`
+        );
+        continue;
+      }
+
       const description = getVal('description', 'Описание', 'Краткое описание');
       const locationPlace = getVal('location_place', 'Место', 'Местоположение');
       const dimensionsStr = getVal('dimensions', 'Размеры (Д*Ш*В), см', 'Размеры, см', 'Размеры');
@@ -3611,12 +3993,7 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       const notes = getVal('notes', 'Примечание', 'Примечания');
       const quantityRaw = getVal('Количество', 'Кол-во', 'quantity');
 
-      const roomStr = getVal('room_number', 'room_id', 'Помещение', 'Кабинет', 'Аудитория');
-      if (!roomStr) {
-        errors.push(`Строка ${index + 1}: не указано помещение (столбец «Помещение»)`);
-        continue;
-      }
-      const cleanRoomStr = roomStr;
+      const cleanRoomStr = getVal('room_number', 'room_id', 'Помещение', 'Кабинет', 'Аудитория');
 
       const recivedRaw = getVal(
         'recived',
@@ -3636,14 +4013,7 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       );
       const residualCostRaw = getVal('residual_cost', 'Остаточная стоимость');
 
-      if (!name) {
-        name = description || (typeNameRaw ? `${typeNameRaw} (${roomStr ? `ауд. ${roomStr}` : 'б/н'})` : '');
-      }
-      if (!name) {
-        name = `Материальная ценность №${index + 1}`;
-      }
-
-      // Check whether this item already exists in DB before auto-generating suffixes
+      // Check whether this item already exists in DB (without mutating inventory_number)
       let matchedExisting: ExistingRecord | null = null;
       let matchReason: string | null = null;
 
@@ -3658,7 +4028,9 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         const nrHit = existingByNameRoom.get(nrKey);
         if (nrHit) {
           matchedExisting = nrHit;
-          matchReason = 'Совпадает наименование и помещение';
+          matchReason = cleanRoomStr
+            ? 'Совпадает наименование и помещение'
+            : 'Совпадает наименование';
         }
       }
 
@@ -3667,20 +4039,20 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
           rowNumber: index + 1,
           inventory_number: rawInvNum || '—',
           name,
-          roomNumber: cleanRoomStr,
+          roomNumber: cleanRoomStr || '—',
           existingId: matchedExisting.id,
-          existingInventoryNumber: matchedExisting.inventory_number,
+          existingInventoryNumber: matchedExisting.inventory_number || '—',
           existingName: matchedExisting.name,
-          existingRoom: matchedExisting.roomNumber,
+          existingRoom: matchedExisting.roomNumber || '—',
           matchReason,
         });
       }
 
-      if (!invNum) {
-        invNum = `INV-${new Date().getFullYear()}-${Math.floor(1000 + Math.random() * 9000)}`;
-      }
+      // Inventory number stays exact as provided, or null if absent (no auto-generation, no suffixes)
+      const invNum: string | null = rawInvNum || null;
 
-      let recivedDate = new Date();
+      // Empty date stays null (not replaced with current date)
+      let recivedDate: Date | null = null;
       if (recivedRaw) {
         const parsed = parseExcelDate(recivedRaw);
         if (parsed) {
@@ -3688,8 +4060,19 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         }
       }
 
-      const initialCost = parseFloat(initialCostRaw.replace(/\s+/g, '').replace(',', '.')) || 0;
-      const residualCost = parseFloat(residualCostRaw.replace(/\s+/g, '').replace(',', '.')) || 0;
+      // Initial cost defaults to 0.00 when empty; residual cost stays null when empty
+      const parsedInit = initialCostRaw
+        ? parseFloat(initialCostRaw.replace(/\s+/g, '').replace(',', '.'))
+        : NaN;
+      const initialCost = !isNaN(parsedInit) && parsedInit >= 0 ? Math.round(parsedInit * 100) / 100 : 0;
+
+      let residualCost: number | null = null;
+      if (residualCostRaw) {
+        const parsedRes = parseFloat(residualCostRaw.replace(/\s+/g, '').replace(',', '.'));
+        if (!isNaN(parsedRes) && parsedRes >= 0) {
+          residualCost = Math.round(parsedRes * 100) / 100;
+        }
+      }
 
       let length_cm: number | null = null;
       let width_cm: number | null = null;
@@ -3715,20 +4098,34 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         preciousRaw.toLowerCase() === 'true' ||
         preciousRaw === '1';
 
-      let status = statusRaw || 'Действует';
-      if (status.toLowerCase().includes('хранен')) status = 'На хранении';
-      else status = 'Действует';
+      let status = 'Действует';
+      if (statusRaw && statusRaw.toLowerCase().includes('хранен')) {
+        status = 'На хранении';
+      }
 
-      let condition = conditionRaw || 'Рабочее';
-      if (condition.toLowerCase().includes('нюанс')) condition = 'Есть нюансы';
-      else if (condition.toLowerCase().includes('неремонт')) condition = 'Неремонтопригодно';
-      else if (condition.toLowerCase().includes('вышл') || condition.toLowerCase().includes('ремонт')) condition = 'Вышло из строя (ремонт возможен)';
-      else condition = 'Рабочее';
+      let condition = 'Рабочее';
+      if (conditionRaw) {
+        const cLow = conditionRaw.toLowerCase();
+        if (cLow.includes('нюанс')) condition = 'Есть нюансы';
+        else if (cLow.includes('неремонт')) condition = 'Неремонтопригодно';
+        else if (cLow.includes('вышл') || cLow.includes('ремонт')) {
+          condition = 'Вышло из строя (ремонт возможен)';
+        }
+      }
 
-      let accounting_category = categoryRaw || 'Дорогостоящее';
-      if (accounting_category.toLowerCase().includes('малоцен')) accounting_category = 'Малоценка';
-      else if (accounting_category.toLowerCase().includes('мягк')) accounting_category = 'Мягкий инвентарь';
-      else accounting_category = 'Дорогостоящее';
+      let accounting_category = 'Без категории';
+      if (categoryRaw) {
+        const catLow = categoryRaw.toLowerCase();
+        if (catLow.includes('малоцен')) accounting_category = 'Малоценка';
+        else if (catLow.includes('мягк')) accounting_category = 'Мягкий инвентарь';
+        else if (catLow.includes('дорогост')) accounting_category = 'Дорогостоящее';
+        else if (catLow.includes('без катег')) accounting_category = 'Без категории';
+      }
+
+      const parsedQty = quantityRaw
+        ? parseInt(String(quantityRaw).replace(/\s+/g, ''), 10)
+        : NaN;
+      const quantity = !isNaN(parsedQty) && parsedQty >= 1 ? parsedQty : 1;
 
       const additional_fields: Record<string, any> = {
         location_place: locationPlace || null,
@@ -3744,13 +4141,8 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         precious_metals: preciousMetals,
         warranty_until: formattedWarrantyUntil,
         notes: notes || null,
+        quantity,
       };
-      if (quantityRaw) {
-        const parsedQty = parseInt(String(quantityRaw).replace(/\s+/g, ''), 10);
-        if (!isNaN(parsedQty) && parsedQty >= 1) {
-          additional_fields.quantity = parsedQty;
-        }
-      }
 
       const reservedKeys = new Set([
         'inventory_number', 'инвентарный номер', 'инвентарный №', 'инв. номер', 'инв номер', 'инв. №', '№ п/п',
@@ -3789,8 +4181,8 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         cleanRoomStr,
         typeNameRaw,
         recivedDate,
-        initialCost: Math.round(initialCost * 100) / 100,
-        residualCost: Math.round(residualCost * 100) / 100,
+        initialCost,
+        residualCost,
         additional_fields,
         matchedExisting,
         matchReason,
@@ -3824,24 +4216,40 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
     const typeMap = new Map<string, number>();
     allTypes.forEach((t: any) => typeMap.set(t.name.trim().toLowerCase(), t.id));
 
-    const resolveRoomId = async (tx: any, cleanRoomStr: string): Promise<number> => {
-      const cleanRoomKey = cleanRoomStr.toLowerCase();
+    const resolveRoomId = async (tx: any, cleanRoomStr: string): Promise<number | null> => {
+      if (!cleanRoomStr || !cleanRoomStr.trim()) {
+        return null;
+      }
+      const cleanRoomKey = cleanRoomStr.trim().toLowerCase();
       const existing = roomMap.get(cleanRoomKey);
       if (existing) return existing;
       const parsedNum = parseInt(cleanRoomStr.replace(/\D/g, ''), 10) || 1;
       const floor = Math.max(1, Math.min(10, Math.floor(parsedNum / 100) || 1));
       const [newRoom] = await tx
         .insert(rooms)
-        .values({ number: cleanRoomStr, floor })
+        .values({ number: cleanRoomStr.trim(), floor })
         .returning();
       roomMap.set(cleanRoomKey, newRoom.id);
-      newRoomsCreated.push(cleanRoomStr);
+      newRoomsCreated.push(cleanRoomStr.trim());
       return newRoom.id;
     };
 
     const resolveTypeId = async (tx: any, typeNameRaw: string): Promise<number> => {
       if (selectedTypeId) return selectedTypeId;
-      let lookupType = (typeNameRaw || 'Периферия').toLowerCase();
+      const cleanRaw = (typeNameRaw || '').trim();
+      if (!cleanRaw) {
+        const existingDefault = typeMap.get('без типа');
+        if (existingDefault) return existingDefault;
+        const [newType] = await tx
+          .insert(equipmentTypes)
+          .values({ name: 'Без типа', parent_id: null })
+          .returning();
+        typeMap.set('без типа', newType.id);
+        newTypesCreated.push('Без типа');
+        return newType.id;
+      }
+
+      let lookupType = cleanRaw.toLowerCase();
       if (lookupType.includes('компьют') || lookupType === 'пк') lookupType = 'компьютер';
       else if (lookupType.includes('ноут')) lookupType = 'ноутбук';
       else if (lookupType.includes('монитор')) lookupType = 'монитор';
@@ -3854,19 +4262,22 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       else if (lookupType.includes('программн') || lookupType === 'по') lookupType = 'по (программное обеспечение)';
       else if (lookupType.includes('перифер') || lookupType.includes('принтер') || lookupType.includes('сканер')) lookupType = 'периферия';
 
+      const exactId = typeMap.get(lookupType) ?? typeMap.get(cleanRaw.toLowerCase());
+      if (exactId) return exactId;
+
       for (const [key, id] of typeMap.entries()) {
+        if (key === 'без типа') continue;
         if (key.includes(lookupType) || lookupType.includes(key)) {
           return id;
         }
       }
 
-      const typeDisplayName = typeNameRaw || 'Периферия';
       const [newType] = await tx
         .insert(equipmentTypes)
-        .values({ name: typeDisplayName, parent_id: null })
+        .values({ name: cleanRaw, parent_id: null })
         .returning();
-      typeMap.set(typeDisplayName.toLowerCase(), newType.id);
-      newTypesCreated.push(typeDisplayName);
+      typeMap.set(cleanRaw.toLowerCase(), newType.id);
+      newTypesCreated.push(cleanRaw);
       return newType.id;
     };
 
@@ -3893,6 +4304,7 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
           await tx
             .update(equipment)
             .set({
+              inventory_number: item.invNum,
               name: item.name,
               type_id: matchedTypeId,
               recived: item.recivedDate,
@@ -3907,12 +4319,9 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
           continue;
         }
 
-        // Insert new record keeping inventory_number exact and unchanged (no -2/-3 hyphen suffixes)
-        const finalInvNum = item.invNum;
-        usedInvNumsLower.add(finalInvNum.toLowerCase());
-
+        // Insert new record keeping inventory_number exact (or null) — no auto-generation or suffixes
         await tx.insert(equipment).values({
-          inventory_number: finalInvNum,
+          inventory_number: item.invNum,
           name: item.name,
           type_id: matchedTypeId,
           recived: item.recivedDate,
@@ -4374,8 +4783,8 @@ async function handleGenerateActRequest(req: any, res: any) {
         writeoffDate: equipmentWriteoffs.writeoff_date,
       })
       .from(equipment)
-      .innerJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
-      .innerJoin(rooms, eq(equipment.room_id, rooms.id))
+      .leftJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
+      .leftJoin(rooms, eq(equipment.room_id, rooms.id))
       .leftJoin(equipmentWriteoffs, eq(equipment.id, equipmentWriteoffs.equipment_id))
       .where(inArray(equipment.id, ids));
 
@@ -4566,8 +4975,8 @@ async function handleGenerateInvoiceRequest(req: any, res: any) {
         additional_fields: equipment.additional_fields,
       })
       .from(equipment)
-      .innerJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
-      .innerJoin(rooms, eq(equipment.room_id, rooms.id))
+      .leftJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
+      .leftJoin(rooms, eq(equipment.room_id, rooms.id))
       .where(inArray(equipment.id, ids));
 
     if (items.length === 0) {
@@ -5298,8 +5707,8 @@ app.get('/api/inventory/current/unverified', requireAuth, requireRole('ADMIN', '
       })
       .from(verifications)
       .innerJoin(equipment, eq(verifications.equipment_id, equipment.id))
-      .innerJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
-      .innerJoin(rooms, eq(equipment.room_id, rooms.id))
+      .leftJoin(equipmentTypes, eq(equipment.type_id, equipmentTypes.id))
+      .leftJoin(rooms, eq(equipment.room_id, rooms.id))
       .where(
         and(
           eq(verifications.inventory_id, active.id),

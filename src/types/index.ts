@@ -53,6 +53,7 @@ export type EquipmentCondition =
   | 'Неремонтопригодно'
   | string;
 export type AccountingCategory =
+  | 'Без категории'
   | 'Дорогостоящее'
   | 'Малоценка'
   | 'Мягкий инвентарь'
@@ -81,16 +82,16 @@ export interface EquipmentAdditionalFields {
 
 export interface Equipment {
   id: number;
-  inventory_number: string;
+  inventory_number: string | null;
   name: string;
   type_id: number;
   typeName: string;
-  recived: string;
-  initial_cost: number;
-  residual_cost: number;
-  room_id: number;
-  roomNumber: string;
-  roomFloor: number;
+  recived: string | null;
+  initial_cost: number | null;
+  residual_cost: number | null;
+  room_id: number | null;
+  roomNumber: string | null;
+  roomFloor: number | null;
   additional_fields: EquipmentAdditionalFields;
   writeoffState?: WriteoffState | null;
   writeoffDate?: string | null;
@@ -125,7 +126,7 @@ export interface NotificationItem {
   broken_at: string;
   equipmentId: number;
   equipmentName: string;
-  inventoryNumber: string;
+  inventoryNumber: string | null;
 }
 
 export interface ActiveAudit {

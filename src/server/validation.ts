@@ -88,7 +88,7 @@ export const STANDARD_DEPARTMENT_FIELDS: Record<string, StandardFieldSpec> = {
   accounting_category: {
     title: 'Категория (по бухучету)',
     kind: 'ENUM',
-    options: ['Дорогостоящее', 'Малоценка', 'Мягкий инвентарь'],
+    options: ['Без категории', 'Дорогостоящее', 'Малоценка', 'Мягкий инвентарь'],
   },
   precious_metals: { title: 'Содержание драгметаллов', kind: 'BOOLEAN' },
   is_under_warranty: { title: 'Оборудование на гарантии', kind: 'BOOLEAN' },

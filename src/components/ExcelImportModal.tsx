@@ -87,7 +87,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
       const selectedType = types.find((t) => t.id === selectedTypeId);
       const headers = [
         'Инвентарный номер',
-        'Наименование',
+        'Наименование (по бухгалтерии)',
         'Дата принятия к учету',
         'Первоначальная стоимость',
         'Остаточная стоимость',
@@ -120,8 +120,8 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
 
       const isFurniture = selectedType?.name.toLowerCase().includes('мебель');
       const sampleRow: Record<string, any> = {
-        'Инвентарный номер': `INV-2026-${Math.floor(100 + Math.random() * 900)}`,
-        'Наименование': isFurniture
+        'Инвентарный номер': '',
+        'Наименование (по бухгалтерии)': isFurniture
           ? 'Шкаф для документов'
           : `Образец (${selectedType?.name || 'оборудование'})`,
         'Дата принятия к учету': '2026-01-15',
@@ -322,15 +322,15 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
                 <div>
                   <span className="font-semibold text-slate-700">Бухучёт (BYN):</span>{' '}
-                  Инвентарный номер, Наименование, Дата принятия к учету, Первоначальная стоимость, Остаточная стоимость
+                  <strong>Наименование (по бухгалтерии)</strong> (единственный обязательный столбец), Инвентарный номер (может быть пустым или совпадать у нескольких записей), Дата принятия к учету, Первоначальная стоимость (если пусто — 0,00), Остаточная стоимость
                 </div>
                 <div>
                   <span className="font-semibold text-slate-700">Размещение и габариты:</span>{' '}
-                  Помещение (обязательно, создается автоматически), Место, Размеры (Д*Ш*В), см, Описание, Цвет
+                  Помещение (необязательно; новые создаются автоматически), Место, Размеры (Д*Ш*В), см, Описание, Цвет
                 </div>
                 <div className="sm:col-span-2">
-                  <span className="font-semibold text-slate-700">Классификация и гарантия:</span>{' '}
-                  Тип оборудования, Статус (Действует / На хранении), Состояние, Категория (по бухучету), Содержание драгметаллов (Да/Нет), Гарантия истекает (ДД.ММ.ГГГГ — статус «На гарантии» вычисляется автоматически по дате; если дата не задана или уже прошла, оборудование считается не на гарантии), Примечание.
+                  <span className="font-semibold text-slate-700">Классификация и значения по умолчанию:</span>{' '}
+                  Пустые ячейки (инв. №, помещение, дата, остаточная стоимость, примечание и др.) сохраняются пустыми. Если не указаны: Тип оборудования → «Без типа», Категория → «Без категории», Количество → 1, Статус → «Действует», Состояние → «Рабочее», Содержание драгметаллов → «Нет». Гарантия вычисляется по столбцу «Гарантия истекает» (пусто или дата прошла → «Нет»).
                 </div>
               </div>
             </div>
@@ -432,7 +432,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                           #{dup.existingId}
                         </td>
                         <td className="p-2 font-mono font-semibold text-blue-700 whitespace-nowrap">
-                          {dup.existingInventoryNumber}
+                          {dup.existingInventoryNumber || '—'}
                         </td>
                         <td className="p-2">
                           <div className="font-medium text-slate-900">{dup.name}</div>
@@ -443,7 +443,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                           )}
                         </td>
                         <td className="p-2 text-slate-600 whitespace-nowrap">
-                          ауд. {dup.existingRoom}
+                          {dup.existingRoom && dup.existingRoom !== '—' ? `ауд. ${dup.existingRoom}` : 'Без помещения'}
                         </td>
                       </tr>
                     ))}

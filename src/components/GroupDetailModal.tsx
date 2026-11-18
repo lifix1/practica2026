@@ -270,7 +270,7 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
                     {data.items.map((item: any) => (
                       <tr key={item.id} className="hover:bg-slate-50">
                         <td className="p-2.5 font-mono text-blue-700 font-bold">
-                          {item.inventory_number}
+                          {item.inventory_number || '—'}
                         </td>
                         <td className="p-2.5 font-medium text-slate-800">
                           {item.name}

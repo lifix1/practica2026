@@ -90,13 +90,13 @@ export async function ensureTablesExist() {
     await db.execute(sql`
       CREATE TABLE IF NOT EXISTS equipment (
         id BIGSERIAL PRIMARY KEY,
-        inventory_number TEXT NOT NULL,
+        inventory_number TEXT,
         name TEXT NOT NULL,
         type_id BIGINT NOT NULL REFERENCES equipment_type(id),
-        recived TIMESTAMP NOT NULL,
-        initial_cost DOUBLE PRECISION NOT NULL,
-        residual_cost DOUBLE PRECISION NOT NULL,
-        room_id BIGINT NOT NULL REFERENCES room(id),
+        recived TIMESTAMP,
+        initial_cost DOUBLE PRECISION,
+        residual_cost DOUBLE PRECISION,
+        room_id BIGINT REFERENCES room(id),
         additional_fields JSON NOT NULL DEFAULT '{}'
       );
     `);
@@ -107,6 +107,11 @@ export async function ensureTablesExist() {
       BEGIN
         ALTER TABLE equipment ALTER COLUMN initial_cost TYPE DOUBLE PRECISION;
         ALTER TABLE equipment ALTER COLUMN residual_cost TYPE DOUBLE PRECISION;
+        ALTER TABLE equipment ALTER COLUMN inventory_number DROP NOT NULL;
+        ALTER TABLE equipment ALTER COLUMN recived DROP NOT NULL;
+        ALTER TABLE equipment ALTER COLUMN initial_cost DROP NOT NULL;
+        ALTER TABLE equipment ALTER COLUMN residual_cost DROP NOT NULL;
+        ALTER TABLE equipment ALTER COLUMN room_id DROP NOT NULL;
         FOR con_name IN
           SELECT c.conname
           FROM pg_constraint c

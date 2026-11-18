@@ -21,6 +21,7 @@ import {
   Trash2,
   AlertCircle,
   X,
+  Download,
 } from 'lucide-react';
 import type { Equipment, EquipmentType, Room, User, AdditionalField } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
@@ -118,6 +119,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
   // Bulk selection
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [generatingQrDocx, setGeneratingQrDocx] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
   const [showQrPrintModal, setShowQrPrintModal] = useState(false);
   const [qrSizeCm, setQrSizeCm] = useState<number>(3);
 
@@ -292,13 +294,15 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
       .catch(console.error);
   }, [selectedTypeId]);
 
-  // Selection toggle
+  // Selection toggle (preserves selections made on other pages)
   const toggleSelectAll = () => {
     const list = Array.isArray(items) ? items : [];
-    if (selectedIds.length === list.length && list.length > 0) {
-      setSelectedIds([]);
+    const allPageSelected = list.length > 0 && list.every((i) => selectedIds.includes(i.id));
+    if (allPageSelected) {
+      const pageIdSet = new Set(list.map((i) => i.id));
+      setSelectedIds((prev) => prev.filter((id) => !pageIdSet.has(id)));
     } else {
-      setSelectedIds(list.map((i) => i.id));
+      setSelectedIds((prev) => Array.from(new Set([...prev, ...list.map((i) => i.id)])));
     }
   };
 
@@ -306,6 +310,40 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
     setSelectedIds((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]
     );
+  };
+
+  // Export selected rows to Excel (.xlsx)
+  const handleExportSelectedExcel = async () => {
+    if (selectedIds.length === 0) return;
+    setExportingExcel(true);
+    setActionError(null);
+    try {
+      const res = await apiFetch('/api/equipment/export-excel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          equipment_ids: selectedIds,
+          source: 'equipment',
+        }),
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Ошибка экспорта в Excel');
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `export-oborudovanie-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setActionError(err.message || 'Не удалось экспортировать данные в Excel');
+    } finally {
+      setExportingExcel(false);
+    }
   };
 
   // Generate QR Codes DOCX file
@@ -560,6 +598,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
               className="w-full p-2 border border-slate-200 rounded-xl bg-slate-50/50 outline-none"
             >
               <option value="">Все помещения</option>
+              <option value="NONE">Без помещения</option>
               {(Array.isArray(rooms) ? rooms : []).map((r) => (
                 <option key={r.id} value={r.id}>
                   Ауд. {r.number} ({r.floor} этаж)
@@ -647,6 +686,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
               className="w-full p-2 border border-slate-200 rounded-xl bg-slate-50/50 outline-none"
             >
               <option value="">Все категории</option>
+              <option value="Без категории">Без категории</option>
               <option value="Дорогостоящее">Дорогостоящее</option>
               <option value="Малоценка">Малоценка</option>
               <option value="Мягкий инвентарь">Мягкий инвентарь</option>
@@ -1094,6 +1134,16 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
 
           <div className="flex flex-wrap items-center gap-2">
             <button
+              onClick={handleExportSelectedExcel}
+              disabled={exportingExcel}
+              className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-800 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 transition-colors shadow-2xs"
+              title="Экспортировать все выбранные строки в таблицу Excel (.xlsx)"
+            >
+              <Download className="w-4 h-4 text-emerald-100" />
+              <span>{exportingExcel ? 'Экспорт...' : 'Экспорт в Excel'}</span>
+            </button>
+
+            <button
               onClick={() => setShowQrPrintModal(true)}
               disabled={generatingQrDocx}
               className="px-3 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 transition-colors"
@@ -1177,7 +1227,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                     onClick={toggleSelectAll}
                     className="text-slate-400 hover:text-slate-700"
                   >
-                    {selectedIds.length > 0 && selectedIds.length === items.length ? (
+                    {items.length > 0 && items.every((i) => selectedIds.includes(i.id)) ? (
                       <CheckSquare className="w-4 h-4 text-blue-600" />
                     ) : (
                       <Square className="w-4 h-4" />
@@ -1249,9 +1299,15 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                         #{item.id}
                       </td>
                       <td className="p-3 font-mono font-bold text-blue-700 whitespace-nowrap">
-                        <div>{item.inventory_number}</div>
+                        {item.inventory_number ? (
+                          <div>{item.inventory_number}</div>
+                        ) : (
+                          <div className="text-slate-400 font-normal">Без инв. №</div>
+                        )}
                         <div className="text-[10px] font-sans font-normal text-slate-400">
-                          с {new Date(item.recived).toLocaleDateString('ru-RU')}
+                          {item.recived
+                            ? `с ${new Date(item.recived).toLocaleDateString('ru-RU')}`
+                            : 'дата не указана'}
                         </div>
                       </td>
                       <td className="p-3 max-w-[240px]">
@@ -1268,7 +1324,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                         )}
                       </td>
                       <td className="p-3 whitespace-nowrap">
-                        <div className="font-medium text-slate-800">{item.typeName}</div>
+                        <div className="font-medium text-slate-800">{item.typeName || 'Без типа'}</div>
                         <div className="flex flex-wrap items-center gap-1 mt-1">
                           {cat && (
                             <span
@@ -1277,7 +1333,9 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                                   ? 'bg-indigo-50 text-indigo-700 border-indigo-200'
                                   : cat === 'Малоценка'
                                   ? 'bg-slate-100 text-slate-700 border-slate-200'
-                                  : 'bg-teal-50 text-teal-700 border-teal-200'
+                                  : cat === 'Мягкий инвентарь'
+                                  ? 'bg-teal-50 text-teal-700 border-teal-200'
+                                  : 'bg-slate-50 text-slate-500 border-slate-200'
                               }`}
                             >
                               {cat}
@@ -1295,9 +1353,15 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                         </div>
                       </td>
                       <td className="p-3">
-                        <div className="font-semibold text-slate-800 whitespace-nowrap">
-                          ауд. {item.roomNumber}
-                        </div>
+                        {item.roomNumber ? (
+                          <div className="font-semibold text-slate-800 whitespace-nowrap">
+                            ауд. {item.roomNumber}
+                          </div>
+                        ) : (
+                          <div className="text-slate-400 font-normal whitespace-nowrap">
+                            Без помещения
+                          </div>
+                        )}
                         {af.location_place && (
                           <div className="text-[11px] text-slate-500 max-w-[160px] truncate" title={af.location_place}>
                             {af.location_place}
@@ -1383,7 +1447,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                         )}
                       </td>
                       <td className="p-3 text-slate-800 whitespace-nowrap font-medium tabular-nums">
-                        {Number(item.initial_cost).toLocaleString('ru-RU', {
+                        {Number(item.initial_cost || 0).toLocaleString('ru-RU', {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,
                         })}{' '}
@@ -1656,7 +1720,11 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                 <>
                   Вы действительно хотите удалить{' '}
                   <strong className="text-slate-900">«{deleteTarget.item.name}»</strong>{' '}
-                  (инв. № <span className="font-mono">{deleteTarget.item.inventory_number}</span>)?
+                  ({deleteTarget.item.inventory_number ? (
+                    <>инв. № <span className="font-mono">{deleteTarget.item.inventory_number}</span></>
+                  ) : (
+                    <>ID #{deleteTarget.item.id}</>
+                  )})?
                   Это действие необратимо.
                 </>
               ) : (

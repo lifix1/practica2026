@@ -14,7 +14,7 @@ interface EquipmentFormModalProps {
 }
 
 function toInputDate(value: any): string {
-  if (!value) return new Date().toISOString().split('T')[0];
+  if (!value) return '';
   const str = String(value).trim();
   const isoPrefix = str.match(/^(\d{4}-\d{2}-\d{2})/);
   if (isoPrefix) return isoPrefix[1];
@@ -22,7 +22,7 @@ function toInputDate(value: any): string {
   if (!isNaN(parsed.getTime())) {
     return parsed.toISOString().split('T')[0];
   }
-  return new Date().toISOString().split('T')[0];
+  return '';
 }
 
 export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
@@ -37,7 +37,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
   const [name, setName] = useState('');
   const [typeId, setTypeId] = useState<number | ''>('');
   const [roomId, setRoomId] = useState<number | ''>('');
-  const [recived, setRecived] = useState(new Date().toISOString().split('T')[0]);
+  const [recived, setRecived] = useState('');
   const [initialCost, setInitialCost] = useState<number | ''>('');
   const [residualCost, setResidualCost] = useState<number | ''>('');
   const [additionalFieldsValues, setAdditionalFieldsValues] = useState<Record<string, any>>({});
@@ -65,44 +65,50 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
       setTypeId(initialData.type_id || '');
       setRoomId(initialData.room_id || '');
       setRecived(toInputDate(initialData.recived));
-      setInitialCost(initialData.initial_cost ?? '');
-      setResidualCost(initialData.residual_cost ?? '');
+      setInitialCost(
+        initialData.initial_cost !== null && initialData.initial_cost !== undefined
+          ? Number(initialData.initial_cost)
+          : ''
+      );
+      setResidualCost(
+        initialData.residual_cost !== null && initialData.residual_cost !== undefined
+          ? Number(initialData.residual_cost)
+          : ''
+      );
+      const af = initialData.additional_fields || {};
       setAdditionalFieldsValues({
         status: 'Действует',
         condition: 'Рабочее',
-        accounting_category: '',
-        precious_metals: '',
-        ...(initialData.additional_fields || {}),
+        ...af,
+        accounting_category: af.accounting_category || 'Без категории',
+        precious_metals: typeof af.precious_metals === 'boolean' ? af.precious_metals : false,
       });
     } else {
-      setInventoryNumber(`INV-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 900)}`);
+      setInventoryNumber('');
       setName('');
-      const safeTypes = Array.isArray(types) ? types : [];
-      const safeRooms = Array.isArray(rooms) ? rooms : [];
-      setTypeId(safeTypes.length > 0 ? safeTypes[0].id : '');
-      setRoomId(safeRooms.length > 0 ? safeRooms[0].id : '');
-      setRecived(new Date().toISOString().split('T')[0]);
+      setTypeId('');
+      setRoomId('');
+      setRecived('');
       setInitialCost('');
       setResidualCost('');
       setAdditionalFieldsValues({
         status: 'Действует',
         condition: 'Рабочее',
-        accounting_category: '',
-        precious_metals: '',
+        accounting_category: 'Без категории',
+        precious_metals: false,
       });
     }
     setErrors([]);
-  }, [initialData, isOpen, types, rooms]);
+  }, [initialData, isOpen]);
 
-  // When typeId changes, fetch inherited dynamic fields and strip stale type-specific keys
+  // When typeId changes, fetch inherited + global dynamic fields (or global-only when no type selected)
   useEffect(() => {
     if (!isOpen) return;
-    if (!typeId) {
-      setDynamicFieldDefs([]);
-      return;
-    }
     let cancelled = false;
-    apiFetch(`/api/equipment-types/${typeId}/fields`)
+    const endpoint = typeId
+      ? `/api/equipment-types/${typeId}/fields`
+      : '/api/additional-fields/global';
+    apiFetch(endpoint)
       .then((r) => r.json())
       .then((fields: AdditionalField[]) => {
         if (cancelled) return;
@@ -184,19 +190,10 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
     e.preventDefault();
 
     const validationErrors: string[] = [];
-    if (!inventoryNumber.trim()) {
-      validationErrors.push('Укажите инвентарный номер оборудования.');
-    }
     if (!name.trim()) {
-      validationErrors.push('Укажите наименование оборудования.');
+      validationErrors.push('Укажите наименование (по бухгалтерии).');
     }
-    if (!typeId) {
-      validationErrors.push('Выберите тип оборудования из списка.');
-    }
-    if (!roomId) {
-      validationErrors.push('Выберите помещение (аудиторию).');
-    }
-    if (!recived || isNaN(new Date(recived).getTime())) {
+    if (recived.trim() && isNaN(new Date(recived).getTime())) {
       validationErrors.push('Укажите корректную дату принятия к учёту.');
     }
     if (initialCost !== '' && (isNaN(Number(initialCost)) || Number(initialCost) < 0)) {
@@ -209,12 +206,6 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
     const qty = Number(additionalFieldsValues.quantity ?? 1);
     if (!Number.isInteger(qty) || qty < 1) {
       validationErrors.push('Поле «Количество (шт.)» должно быть целым числом не меньше 1.');
-    }
-    if (!additionalFieldsValues.accounting_category) {
-      validationErrors.push('Выберите обязательное поле «Категория (по бухучету)».');
-    }
-    if (typeof additionalFieldsValues.precious_metals !== 'boolean') {
-      validationErrors.push('Укажите обязательное поле «Содержание драгметаллов» (Да или Нет).');
     }
 
     if (additionalFieldsValues.dimensions && String(additionalFieldsValues.dimensions).trim()) {
@@ -254,6 +245,13 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
 
     const cleanedFields: Record<string, any> = {
       ...additionalFieldsValues,
+      accounting_category: additionalFieldsValues.accounting_category || 'Без категории',
+      precious_metals:
+        typeof additionalFieldsValues.precious_metals === 'boolean'
+          ? additionalFieldsValues.precious_metals
+          : false,
+      status: additionalFieldsValues.status || 'Действует',
+      condition: additionalFieldsValues.condition || 'Рабочее',
       quantity: qty,
       warranty_until: warrantyUntilVal ? String(warrantyUntilVal).trim() : null,
     };
@@ -264,13 +262,13 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
     const payloadFields = cleanedFields;
 
     const payload = {
-      inventory_number: inventoryNumber.trim(),
+      inventory_number: inventoryNumber.trim() || null,
       name: name.trim(),
-      type_id: Number(typeId),
-      room_id: Number(roomId),
-      recived: new Date(recived).toISOString(),
+      type_id: typeId ? Number(typeId) : null,
+      room_id: roomId ? Number(roomId) : null,
+      recived: recived.trim() ? new Date(recived).toISOString() : null,
       initial_cost: initialCost === '' ? 0 : Number(initialCost),
-      residual_cost: residualCost === '' ? 0 : Number(residualCost),
+      residual_cost: residualCost === '' ? null : Number(residualCost),
       additional_fields: payloadFields,
     };
 
@@ -335,7 +333,11 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
               {initialData ? 'Редактирование оборудования' : 'Добавление нового оборудования'}
             </h3>
             <p className="text-xs text-slate-400">
-              {initialData ? `Инв. № ${initialData.inventory_number}` : 'Заполните параметры единицы учета кафедры'}
+              {initialData
+                ? initialData.inventory_number
+                  ? `Инв. № ${initialData.inventory_number}`
+                  : `ID #${initialData.id} • без инв. номера`
+                : 'Заполните параметры единицы учета (обязательно только наименование)'}
             </p>
           </div>
           <button
@@ -373,52 +375,44 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Инвентарный номер *
+                Инвентарный номер
               </label>
               <input
                 type="text"
                 value={inventoryNumber}
                 onChange={(e) => setInventoryNumber(e.target.value)}
-                placeholder="INV-2026-001"
+                placeholder="Необязательно (может повторяться или быть пустым)"
                 className="w-full text-xs p-2.5 border border-slate-300 rounded-xl font-mono focus:ring-2 focus:ring-blue-500 outline-none"
-                required
               />
             </div>
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Тип оборудования *
+                Тип оборудования
               </label>
-              {Array.isArray(types) && types.length === 0 ? (
-                <div className="p-2.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 text-[11px] font-medium">
-                  Справочник типов пуст — сначала создайте тип во вкладке «Типы и поля».
-                </div>
-              ) : (
-                <select
-                  value={typeId}
-                  onChange={(e) => setTypeId(Number(e.target.value))}
-                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                  required
-                >
-                  <option value="">Выберите тип...</option>
-                  {flattenTypeTree(types).map(({ type: t, label }) => (
-                    <option key={t.id} value={t.id}>
-                      {label}
-                    </option>
-                  ))}
-                </select>
-              )}
+              <select
+                value={typeId}
+                onChange={(e) => setTypeId(e.target.value === '' ? '' : Number(e.target.value))}
+                className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+              >
+                <option value="">Без типа (по умолчанию)</option>
+                {flattenTypeTree(types).map(({ type: t, label }) => (
+                  <option key={t.id} value={t.id}>
+                    {label}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div className="sm:col-span-2">
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Наименование оборудования *
+                Наименование (по бухгалтерии) *
               </label>
               <input
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="Например: Центральный стол на 12 мест или Лазерный принтер HP LJ 1020"
+                placeholder="Например: Центральный стол на 12 мест или Колонки Genius"
                 className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
                 required
               />
@@ -426,40 +420,44 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Помещение / Аудитория *
+                Помещение / Аудитория
               </label>
-              {Array.isArray(rooms) && rooms.length === 0 ? (
-                <div className="p-2.5 rounded-xl border border-amber-300 bg-amber-50 text-amber-900 text-[11px] font-medium">
-                  Справочник помещений пуст — сначала добавьте аудиторию во вкладке «Кабинеты».
-                </div>
-              ) : (
-                <select
-                  value={roomId}
-                  onChange={(e) => setRoomId(Number(e.target.value))}
+              <select
+                value={roomId}
+                onChange={(e) => setRoomId(e.target.value === '' ? '' : Number(e.target.value))}
+                className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+              >
+                <option value="">Не указано (без помещения)</option>
+                {(Array.isArray(rooms) ? rooms : []).map((r) => (
+                  <option key={r.id} value={r.id}>
+                    Ауд. {r.number} ({r.floor} этаж)
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Дата принятия к учету
+              </label>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="date"
+                  value={recived}
+                  onChange={(e) => setRecived(e.target.value)}
                   className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                  required
-                >
-                  <option value="">Выберите кабинет...</option>
-                  {(Array.isArray(rooms) ? rooms : []).map((r) => (
-                    <option key={r.id} value={r.id}>
-                      Ауд. {r.number} ({r.floor} этаж)
-                    </option>
-                  ))}
-                </select>
-              )}
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Дата принятия к учету *
-              </label>
-              <input
-                type="date"
-                value={recived}
-                onChange={(e) => setRecived(e.target.value)}
-                className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                required
-              />
+                />
+                {recived && (
+                  <button
+                    type="button"
+                    onClick={() => setRecived('')}
+                    className="px-2.5 py-2.5 text-xs text-slate-500 hover:text-red-600 hover:bg-red-50 border border-slate-200 rounded-xl transition-colors"
+                    title="Очистить дату принятия к учету"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
 
             <div>
@@ -485,7 +483,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
                 step="0.01"
                 value={residualCost}
                 onChange={(e) => setResidualCost(e.target.value === '' ? '' : Number(e.target.value))}
-                placeholder="0.00"
+                placeholder="Пусто — не указана"
                 className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
               />
             </div>
@@ -572,15 +570,14 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Категория (по бухучету) *
+                  Категория (по бухучету)
                 </label>
                 <select
-                  value={additionalFieldsValues.accounting_category || ''}
+                  value={additionalFieldsValues.accounting_category || 'Без категории'}
                   onChange={(e) => handleDynamicFieldChange('accounting_category', e.target.value)}
                   className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none bg-white focus:ring-2 focus:ring-blue-500"
-                  required
                 >
-                  <option value="">Выберите категорию...</option>
+                  <option value="Без категории">Без категории</option>
                   <option value="Дорогостоящее">Дорогостоящее</option>
                   <option value="Малоценка">Малоценка</option>
                   <option value="Мягкий инвентарь">Мягкий инвентарь</option>
@@ -589,30 +586,15 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Содержание драгметаллов *
+                  Содержание драгметаллов
                 </label>
                 <select
-                  value={
-                    additionalFieldsValues.precious_metals === true
-                      ? 'true'
-                      : additionalFieldsValues.precious_metals === false
-                      ? 'false'
-                      : ''
-                  }
+                  value={additionalFieldsValues.precious_metals === true ? 'true' : 'false'}
                   onChange={(e) =>
-                    handleDynamicFieldChange(
-                      'precious_metals',
-                      e.target.value === 'true'
-                        ? true
-                        : e.target.value === 'false'
-                        ? false
-                        : ''
-                    )
+                    handleDynamicFieldChange('precious_metals', e.target.value === 'true')
                   }
                   className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none bg-white focus:ring-2 focus:ring-blue-500"
-                  required
                 >
-                  <option value="">Выберите значение...</option>
                   <option value="false">Нет</option>
                   <option value="true">Да</option>
                 </select>
@@ -743,7 +725,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
             <div className="border-t border-slate-200 pt-4 space-y-4">
               <div className="flex items-center justify-between">
                 <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                  Дополнительные характеристики (общие и типа «{selectedTypeName}»)
+                  Дополнительные характеристики ({selectedTypeName ? `общие и типа «${selectedTypeName}»` : 'общие'})
                 </h4>
                 <span className="text-[11px] text-slate-500">
                   {extraCustomFieldDefs.length} полей

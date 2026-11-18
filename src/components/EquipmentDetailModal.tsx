@@ -94,7 +94,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       })
       .then((detail) => {
         setData(detail);
-        const qrPayload = detail.qrCode || detail.inventory_number || '';
+        const qrPayload = detail.qrCode || detail.inventory_number || String(detail.id);
         if (qrPayload) {
           QRCode.toDataURL(qrPayload, { width: 220, margin: 1 })
             .then(setQrDataUrl)
@@ -396,10 +396,10 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-mono text-xs bg-slate-800 border border-slate-700 text-blue-300 px-2 py-0.5 rounded">
-                  {data?.inventory_number || 'Загрузка...'}
+                  {data ? (data.inventory_number || 'Без инв. номера') : 'Загрузка...'}
                 </span>
                 <span className="text-xs text-slate-400">
-                  {data?.typeName}
+                  {data?.typeName || ''}
                 </span>
               </div>
               <h2 className="text-base sm:text-lg font-bold text-white truncate max-w-md">
@@ -662,7 +662,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                     )}
                   </div>
                   <span className="text-[11px] font-mono text-slate-700 font-bold">
-                    Инв. № {data.inventory_number}
+                    {data.inventory_number ? `Инв. № ${data.inventory_number}` : `Без инв. номера (ID #${data.id})`}
                   </span>
                   {data.qrCode && (
                     <div className="mt-1 px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700 text-[10px] font-mono select-all">
@@ -691,7 +691,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                     )}
                     <a
                       href={qrDataUrl}
-                      download={`QR-${data.inventory_number}.png`}
+                      download={`QR-${data.inventory_number || `ID-${data.id}`}.png`}
                       className="text-xs text-blue-600 hover:text-blue-800 font-semibold inline-flex items-center gap-1"
                     >
                       <Download className="w-3.5 h-3.5" />
@@ -709,7 +709,9 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                     <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
                       <span className="text-slate-500 block">Помещение / Аудитория</span>
                       <span className="font-semibold text-slate-900 text-sm">
-                        № {data.roomNumber} ({data.roomFloor} этаж)
+                        {data.roomNumber
+                          ? `№ ${data.roomNumber}${data.roomFloor !== null && data.roomFloor !== undefined ? ` (${data.roomFloor} этаж)` : ''}`
+                          : 'Не указано'}
                       </span>
                       {data.additional_fields?.location_place && (
                         <span className="text-[11px] text-slate-600 block mt-0.5">
@@ -720,13 +722,13 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                     <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
                       <span className="text-slate-500 block">Дата принятия к учету</span>
                       <span className="font-semibold text-slate-900 text-sm">
-                        {new Date(data.recived).toLocaleDateString('ru-RU')}
+                        {data.recived ? new Date(data.recived).toLocaleDateString('ru-RU') : 'Не указана'}
                       </span>
                     </div>
                     <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
                       <span className="text-slate-500 block">Первоначальная стоимость</span>
                       <span className="font-semibold text-slate-900 text-sm">
-                        {Number(data.initial_cost).toLocaleString('ru-RU', {
+                        {Number(data.initial_cost || 0).toLocaleString('ru-RU', {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,
                         })}{' '}
@@ -736,11 +738,17 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                     <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
                       <span className="text-slate-500 block">Остаточная стоимость</span>
                       <span className="font-semibold text-slate-900 text-sm">
-                        {Number(data.residual_cost).toLocaleString('ru-RU', {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}{' '}
-                        BYN
+                        {data.residual_cost !== null && data.residual_cost !== undefined ? (
+                          <>
+                            {Number(data.residual_cost).toLocaleString('ru-RU', {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}{' '}
+                            BYN
+                          </>
+                        ) : (
+                          'Не указана'
+                        )}
                       </span>
                     </div>
                   </div>
@@ -768,7 +776,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                   <div className="p-3 rounded-xl border border-slate-200 bg-white">
                     <span className="text-slate-500 block mb-0.5">Категория (по бухучету)</span>
                     <span className="font-semibold text-slate-900">
-                      {data.additional_fields?.accounting_category || 'Дорогостоящее'}
+                      {data.additional_fields?.accounting_category || 'Без категории'}
                     </span>
                   </div>
                   <div className="p-3 rounded-xl border border-slate-200 bg-white">
@@ -983,8 +991,12 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
             </h3>
             <p className="text-xs text-slate-600 leading-relaxed">
               Вы действительно хотите удалить{' '}
-              <strong className="text-slate-900">«{data.name}»</strong> (инв. №{' '}
-              <span className="font-mono">{data.inventory_number}</span>)? Это действие необратимо.
+              <strong className="text-slate-900">«{data.name}»</strong> (
+              {data.inventory_number ? (
+                <>инв. № <span className="font-mono">{data.inventory_number}</span></>
+              ) : (
+                <>ID #{data.id}</>
+              )})? Это действие необратимо.
             </p>
             <div className="flex justify-end gap-2 pt-2">
               <button
@@ -1278,8 +1290,9 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
             <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1">
               <div className="font-semibold text-slate-800">{data?.name}</div>
               <div className="text-slate-500 font-mono text-[11px] tabular-nums">
-                Инв. № {data?.inventory_number} • Каб. {data?.roomNumber} •{' '}
-                {Number(data?.initial_cost).toLocaleString('ru-RU', {
+                {data?.inventory_number ? `Инв. № ${data.inventory_number}` : `ID #${data?.id}`} •{' '}
+                {data?.roomNumber ? `Каб. ${data.roomNumber}` : 'Без помещения'} •{' '}
+                {Number(data?.initial_cost || 0).toLocaleString('ru-RU', {
                   minimumFractionDigits: 2,
                   maximumFractionDigits: 2,
                 })}{' '}

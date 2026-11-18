@@ -188,7 +188,7 @@ export const GroupQrModal: React.FC<GroupQrModalProps> = ({
                       {idx + 1}. {item.name}
                     </span>
                     <span className="font-mono text-blue-700 font-bold shrink-0">
-                      {item.inventory_number}
+                      {item.inventory_number || 'б/н'}
                     </span>
                   </div>
                 ))}

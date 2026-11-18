@@ -84,17 +84,15 @@ export const additionalFields = pgTable('additional_field', {
 // 7. Table "equipment"
 export const equipment = pgTable('equipment', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
-  inventory_number: text('inventory_number').notNull(),
+  inventory_number: text('inventory_number'),
   name: text('name').notNull(),
   type_id: bigint('type_id', { mode: 'number' })
     .notNull()
     .references(() => equipmentTypes.id),
-  recived: timestamp('recived').notNull(),
-  initial_cost: doublePrecision('initial_cost').notNull(),
-  residual_cost: doublePrecision('residual_cost').notNull(),
-  room_id: bigint('room_id', { mode: 'number' })
-    .notNull()
-    .references(() => rooms.id),
+  recived: timestamp('recived'),
+  initial_cost: doublePrecision('initial_cost'),
+  residual_cost: doublePrecision('residual_cost'),
+  room_id: bigint('room_id', { mode: 'number' }).references(() => rooms.id),
   additional_fields: json('additional_fields')
     .$type<Record<string, any>>()
     .notNull()

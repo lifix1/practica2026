@@ -21,12 +21,12 @@ import { encodeEquipmentQrToken, encodeGroupQrToken } from './qr-token.ts';
 export interface EquipmentForDocx {
   id: number;
   qrCode?: string;
-  inventory_number: string;
+  inventory_number: string | null;
   name: string;
   typeName: string;
-  roomNumber: string;
-  initial_cost: number | string;
-  residual_cost: number | string;
+  roomNumber: string | null;
+  initial_cost: number | string | null;
+  residual_cost: number | string | null;
   recivedDate: string;
   recivedRaw?: Date | string | null;
   additional_fields?: Record<string, any> | null;
@@ -176,8 +176,17 @@ function extractCalendarYMD(input: Date | string | null | undefined): {
   };
 }
 
+function isEmptyDateValue(input: Date | string | null | undefined): boolean {
+  if (!input) return true;
+  if (typeof input === 'string') {
+    const trimmed = input.trim();
+    return !trimmed || trimmed === '—' || trimmed === '-';
+  }
+  return false;
+}
+
 export function formatDateRu(input: Date | string | null | undefined): string {
-  if (!input) return '';
+  if (isEmptyDateValue(input)) return '';
   const { year, month, day } = extractCalendarYMD(input);
   return `${String(day).padStart(2, '0')}.${String(month).padStart(2, '0')}.${year}`;
 }
@@ -199,7 +208,7 @@ export function calculateServiceLife(
   startInput: Date | string | null | undefined,
   endInput: Date | string | null | undefined
 ): { years: number; months: number; formatted: string } {
-  if (!startInput) {
+  if (isEmptyDateValue(startInput)) {
     return { years: 0, months: 0, formatted: '—' };
   }
   const start = extractCalendarYMD(startInput);
@@ -406,7 +415,7 @@ export async function generateQrDocx(
                 size: invFontSize,
               }),
               new TextRun({
-                text: item.inventory_number,
+                text: item.inventory_number || 'б/н',
                 bold: true,
                 size: invFontSize,
                 color: '1E40AF',
@@ -418,7 +427,7 @@ export async function generateQrDocx(
             spacing: { before: 30 },
             children: [
               new TextRun({
-                text: `Тип: ${item.typeName} | Каб. ${item.roomNumber}`,
+                text: `Тип: ${item.typeName || 'Без типа'}${item.roomNumber ? ` | Каб. ${item.roomNumber}` : ''}`,
                 size: metaFontSize,
                 color: '64748B',
               }),
@@ -714,7 +723,7 @@ export function buildWriteoffCase1Sections(
               alignment: AlignmentType.CENTER,
               margins: { top: 80, bottom: 80, left: 60, right: 60 },
             }),
-            makeCell(item.inventory_number, {
+            makeCell(item.inventory_number || 'б/н', {
               width: 1900,
               size: 18,
               alignment: AlignmentType.CENTER,
@@ -1357,7 +1366,7 @@ export function buildTransferInvoiceCase1Sections(
             alignment: AlignmentType.CENTER,
             margins: { top: 30, bottom: 30, left: 40, right: 40 },
           }),
-          makeCell(item.inventory_number, {
+          makeCell(item.inventory_number || 'б/н', {
             width: 1450,
             size: 16,
             alignment: AlignmentType.CENTER,
@@ -1629,7 +1638,7 @@ export interface GroupQrBatchData {
   qrCode?: string;
   code: string;
   name: string;
-  roomNumber?: string;
+  roomNumber?: string | null;
   items: EquipmentForDocx[];
 }
 
@@ -1686,7 +1695,7 @@ export async function generateGroupQrDocx(
           new TableCell({
             children: [
               new Paragraph({
-                children: [new TextRun({ text: item.inventory_number, bold: true, color: '1E40AF' })],
+                children: [new TextRun({ text: item.inventory_number || 'б/н', bold: true, color: '1E40AF' })],
               }),
             ],
           }),
@@ -2042,7 +2051,7 @@ export function buildWriteoffCase2Sections(
               margins: { top: 80, bottom: 80, left: 40, right: 40 },
             }),
             makeCell('', { width: 850, size: 14 }),
-            makeCell(item.inventory_number, { width: 1150, size: 14, alignment: AlignmentType.CENTER }),
+            makeCell(item.inventory_number || 'б/н', { width: 1150, size: 14, alignment: AlignmentType.CENTER }),
             makeCell('', { width: 500, size: 14 }),
             makeCell('', { width: 650, size: 14 }),
             makeCell(String(qty), { width: 650, size: 15, alignment: AlignmentType.CENTER }),
@@ -2549,7 +2558,7 @@ export function buildLowValueInvoiceCase2Sections(
             alignment: AlignmentType.LEFT,
             margins: { top: 30, bottom: 30, left: 40, right: 40 },
           }),
-          makeCell(item.inventory_number, {
+          makeCell(item.inventory_number || 'б/н', {
             width: 1450,
             size: 15,
             alignment: AlignmentType.LEFT,
@@ -3007,7 +3016,7 @@ export function buildWriteoffCase3Sections(
           alignment: AlignmentType.LEFT,
           margins: { top: 40, bottom: 40, left: 50, right: 40 },
         }),
-        makeCell(item.inventory_number, {
+        makeCell(item.inventory_number || 'б/н', {
           width: 1450,
           size: 14,
           alignment: AlignmentType.CENTER,

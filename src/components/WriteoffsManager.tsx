@@ -21,7 +21,7 @@ interface WriteoffsManagerProps {
   onOpenEquipmentDetail: (id: number) => void;
 }
 
-function formatServiceLifePreview(recivedIso: string, targetDateStr: string): string {
+function formatServiceLifePreview(recivedIso: string | null | undefined, targetDateStr: string): string {
   if (!recivedIso || !targetDateStr) return '—';
   const startStr = recivedIso.slice(0, 10);
   const startMatch = startStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -91,6 +91,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
   const [downloadingAct, setDownloadingAct] = useState(false);
   const [downloadingInvoice, setDownloadingInvoice] = useState(false);
   const [downloadingSample, setDownloadingSample] = useState(false);
+  const [exportingExcel, setExportingExcel] = useState(false);
 
   // Document parameters
   const [docDate, setDocDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -199,6 +200,40 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
     a.click();
     a.remove();
     window.URL.revokeObjectURL(url);
+  };
+
+  // Export selected writeoff rows to Excel (.xlsx)
+  const handleExportSelectedExcel = async () => {
+    if (selectedIds.length === 0) return;
+    setExportingExcel(true);
+    try {
+      const res = await apiFetch('/api/equipment/export-excel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          equipment_ids: selectedIds,
+          source: 'writeoff',
+        }),
+      });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || 'Ошибка экспорта в Excel');
+      }
+      const blob = await res.blob();
+      const cd = res.headers.get('Content-Disposition') || '';
+      const fnMatch = cd.match(/filename="([^"]+)"/i);
+      const filename =
+        fnMatch?.[1] || `export-spisanie-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      triggerBlobDownload(blob, filename);
+      setFeedbackMsg({
+        type: 'success',
+        text: `Выбранные строки списания (${selectedIds.length} поз.) экспортированы в Excel!`,
+      });
+    } catch (err: any) {
+      setFeedbackMsg({ type: 'error', text: err.message || 'Ошибка экспорта в Excel' });
+    } finally {
+      setExportingExcel(false);
+    }
   };
 
   // Download Sample Act or Sample Invoice DOCX
@@ -431,9 +466,9 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
     if (!modalSearch.trim()) return true;
     const q = modalSearch.toLowerCase();
     return (
-      eq.name.toLowerCase().includes(q) ||
-      eq.inventory_number.toLowerCase().includes(q) ||
-      eq.roomNumber.toLowerCase().includes(q)
+      (eq.name || '').toLowerCase().includes(q) ||
+      (eq.inventory_number || '').toLowerCase().includes(q) ||
+      (eq.roomNumber || '').toLowerCase().includes(q)
     );
   });
 
@@ -640,6 +675,16 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
             <span>Выбрано позиций: {selectedIds.length}</span>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleExportSelectedExcel}
+              disabled={exportingExcel}
+              className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors inline-flex items-center gap-1.5"
+              title="Экспортировать все выбранные строки в таблицу Excel (.xlsx)"
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+              {exportingExcel ? 'Экспорт...' : 'Экспорт в Excel'}
+            </button>
             {(() => {
               const selectedObjs = items.filter((it) => selectedIds.includes(it.id));
               const actEligibleIds =
@@ -808,7 +853,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                       className="mt-1 sm:mt-0 rounded text-blue-600 cursor-pointer"
                     />
                     <span className="font-mono font-bold bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-[11px] shrink-0">
-                      {item.inventory_number}
+                      {item.inventory_number || 'б/н'}
                     </span>
                     <div>
                       <div className="flex flex-wrap items-center gap-1.5">
@@ -854,10 +899,10 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                         )}
                       </div>
                       <div className="text-[11px] text-slate-500 mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5">
-                        <span>{item.typeName}</span>
-                        <span>• Каб. {item.roomNumber}</span>
+                        <span>{item.typeName || 'Без типа'}</span>
+                        <span>• {item.roomNumber ? `Каб. ${item.roomNumber}` : 'Без помещения'}</span>
                         <span>
-                          • Ввод: {new Date(item.recived).toLocaleDateString('ru-RU')} (срок на{' '}
+                          • Ввод: {item.recived ? new Date(item.recived).toLocaleDateString('ru-RU') : 'не указана'} (срок на{' '}
                           {docDate ? new Date(`${docDate}T00:00:00`).toLocaleDateString('ru-RU') : 'сегодня'}:{' '}
                           <strong className="text-slate-700">{serviceLife}</strong>)
                         </span>
@@ -1011,7 +1056,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                               className="rounded text-red-600"
                             />
                             <span className="font-mono text-[11px] bg-slate-100 px-1.5 py-0.5 rounded shrink-0">
-                              {eq.inventory_number}
+                              {eq.inventory_number || 'б/н'}
                             </span>
                             <span className="font-medium text-slate-800 truncate">{eq.name}</span>
                           </div>

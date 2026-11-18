@@ -460,14 +460,14 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
                   >
                     <div className="flex items-center gap-2 truncate">
                       <span className="font-mono font-bold bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-[11px] tabular-nums">
-                        {item.inventory_number}
+                        {item.inventory_number || 'б/н'}
                       </span>
                       <span className="font-medium text-slate-900 truncate">
                         {item.name}
                       </span>
                     </div>
                     <span className="text-[11px] text-slate-500 shrink-0 tabular-nums">
-                      каб. {item.roomNumber}
+                      {item.roomNumber ? `каб. ${item.roomNumber}` : 'без каб.'}
                     </span>
                   </button>
                 ))}
