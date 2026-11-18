@@ -28,7 +28,7 @@ export type FieldDataType =
 
 export interface AdditionalField {
   id: number;
-  type_id: number;
+  type_id: number | null;
   code: string;
   title: string;
   data_type: FieldDataType;

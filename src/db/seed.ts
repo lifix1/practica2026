@@ -70,7 +70,7 @@ export async function ensureTablesExist() {
     await db.execute(sql`
       CREATE TABLE IF NOT EXISTS additional_field (
         id BIGSERIAL PRIMARY KEY,
-        type_id BIGINT NOT NULL REFERENCES equipment_type(id) ON DELETE CASCADE,
+        type_id BIGINT REFERENCES equipment_type(id) ON DELETE CASCADE,
         code TEXT NOT NULL,
         title TEXT NOT NULL,
         data_type data_type_enum NOT NULL,
@@ -79,6 +79,12 @@ export async function ensureTablesExist() {
         options JSON,
         is_active BOOLEAN NOT NULL DEFAULT TRUE
       );
+    `);
+
+    await db.execute(sql`
+      DO $$ BEGIN
+        ALTER TABLE additional_field ALTER COLUMN type_id DROP NOT NULL;
+      EXCEPTION WHEN OTHERS THEN null; END $$;
     `);
 
     await db.execute(sql`

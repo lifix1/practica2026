@@ -12,6 +12,7 @@ import {
 import * as XLSX from 'xlsx';
 import type { EquipmentType } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
+import { flattenTypeTree } from '../utils/typeTree.ts';
 
 interface ExcelImportModalProps {
   isOpen: boolean;
@@ -99,7 +100,6 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
         'Состояние',
         'Категория (по бухучету)',
         'Содержание драгметаллов',
-        'Оборудование на гарантии',
         'Гарантия истекает',
         'Примечание',
       ];
@@ -129,14 +129,13 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
         'Остаточная стоимость': 980.0,
         'Помещение': '308',
         'Место': 'Стол 1',
-        'Размеры (Д*Ш*В), см': isFurniture ? '120*45*200' : '',
+        'Размеры (Д*Ш*В), см': isFurniture ? '120*45*200' : '50*40*30',
         'Описание': '',
         'Цвет': 'серый',
         'Статус': 'Действует',
         'Состояние': 'Рабочее',
         'Категория (по бухучету)': 'Дорогостоящее',
         'Содержание драгметаллов': isFurniture ? 'Нет' : 'Да',
-        'Оборудование на гарантии': 'Да',
         'Гарантия истекает': '15.01.2028',
         'Примечание': '',
       };
@@ -292,9 +291,9 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                   <option value="">
                     Все типы (тип берется из столбца «Тип оборудования» таблицы)
                   </option>
-                  {(Array.isArray(types) ? types : []).map((t) => (
+                  {flattenTypeTree(types).map(({ type: t, label }) => (
                     <option key={t.id} value={t.id}>
-                      Только «{t.name}» (принудительно для всех строк)
+                      Только «{label}» (принудительно для всех строк)
                     </option>
                   ))}
                 </select>
@@ -331,7 +330,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                 </div>
                 <div className="sm:col-span-2">
                   <span className="font-semibold text-slate-700">Классификация и гарантия:</span>{' '}
-                  Тип оборудования, Статус (Действует / На хранении), Состояние, Категория (по бухучету), Содержание драгметаллов (Да/Нет), Оборудование на гарантии, Гарантия истекает (ДД.ММ.ГГГГ — статус обновится на «Нет» автоматически на следующий день после даты), Примечание.
+                  Тип оборудования, Статус (Действует / На хранении), Состояние, Категория (по бухучету), Содержание драгметаллов (Да/Нет), Гарантия истекает (ДД.ММ.ГГГГ — статус «На гарантии» вычисляется автоматически по дате; если дата не задана или уже прошла, оборудование считается не на гарантии), Примечание.
                 </div>
               </div>
             </div>

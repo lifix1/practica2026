@@ -66,12 +66,12 @@ export const equipmentTypes = pgTable('equipment_type', {
   parent_id: bigint('parent_id', { mode: 'number' }),
 });
 
-// 6. Table "additional_field"
+// 6. Table "additional_field" (type_id = NULL means global field present on all equipment types)
 export const additionalFields = pgTable('additional_field', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
-  type_id: bigint('type_id', { mode: 'number' })
-    .notNull()
-    .references(() => equipmentTypes.id, { onDelete: 'cascade' }),
+  type_id: bigint('type_id', { mode: 'number' }).references(() => equipmentTypes.id, {
+    onDelete: 'cascade',
+  }),
   code: text('code').notNull(),
   title: text('title').notNull(),
   data_type: dataTypeEnum('data_type').notNull(),

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { X, Plus, Trash2, AlertCircle, Save, ShieldCheck, ShieldAlert } from 'lucide-react';
 import type { Room, EquipmentType, AdditionalField } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
+import { flattenTypeTree } from '../utils/typeTree.ts';
 
 interface EquipmentFormModalProps {
   isOpen: boolean;
@@ -71,7 +72,6 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
         condition: 'Рабочее',
         accounting_category: '',
         precious_metals: '',
-        is_under_warranty: false,
         ...(initialData.additional_fields || {}),
       });
     } else {
@@ -89,7 +89,6 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
         condition: 'Рабочее',
         accounting_category: '',
         precious_metals: '',
-        is_under_warranty: false,
       });
     }
     setErrors([]);
@@ -140,7 +139,6 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
 
   const selectedTypeName =
     (Array.isArray(types) ? types : []).find((t) => t.id === Number(typeId))?.name || '';
-  const isFurniture = selectedTypeName.toLowerCase().includes('мебель');
 
   const handleDynamicFieldChange = (code: string, value: any) => {
     setAdditionalFieldsValues((prev) => ({
@@ -149,16 +147,19 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
     }));
   };
 
-  // Compute live warranty status preview
-  const warrantyUntilVal = additionalFieldsValues.warranty_until || '';
-  let computedWarrantyActive = Boolean(additionalFieldsValues.is_under_warranty);
+  // Derive warranty status strictly from warranty_until date:
+  // no date -> not under warranty; date < today -> expired (not under warranty); date >= today -> under warranty
+  const warrantyUntilVal = additionalFieldsValues.warranty_until
+    ? toInputDate(additionalFieldsValues.warranty_until)
+    : '';
+  let computedWarrantyActive = false;
   let warrantyExpiredByDate = false;
   if (warrantyUntilVal) {
     const now = new Date();
     const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     const trimmed = String(warrantyUntilVal).trim();
     if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-      computedWarrantyActive = todayStr <= trimmed;
+      computedWarrantyActive = trimmed >= todayStr;
       warrantyExpiredByDate = !computedWarrantyActive;
     }
   }
@@ -251,13 +252,16 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
     setLoading(true);
     setErrors([]);
 
-    const payloadFields = {
+    const cleanedFields: Record<string, any> = {
       ...additionalFieldsValues,
       quantity: qty,
-      is_under_warranty: warrantyUntilVal
-        ? computedWarrantyActive
-        : Boolean(additionalFieldsValues.is_under_warranty),
+      warranty_until: warrantyUntilVal ? String(warrantyUntilVal).trim() : null,
     };
+    delete cleanedFields.is_under_warranty;
+    delete cleanedFields.warranty_expired;
+    delete cleanedFields.warranty_status_ru;
+
+    const payloadFields = cleanedFields;
 
     const payload = {
       inventory_number: inventoryNumber.trim(),
@@ -397,9 +401,9 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
                   required
                 >
                   <option value="">Выберите тип...</option>
-                  {(Array.isArray(types) ? types : []).map((t) => (
+                  {flattenTypeTree(types).map(({ type: t, label }) => (
                     <option key={t.id} value={t.id}>
-                      {t.name}
+                      {label}
                     </option>
                   ))}
                 </select>
@@ -520,22 +524,20 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
                 />
               </div>
 
-              <div className={isFurniture ? 'sm:col-span-2 p-3 bg-indigo-50/70 border border-indigo-200 rounded-xl' : ''}>
+              <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Размеры (Д*Ш*В), см {isFurniture && <span className="text-indigo-700">(для корпусной мебели)</span>}
+                  Размеры (Д*Ш*В), см
                 </label>
                 <input
                   type="text"
                   value={additionalFieldsValues.dimensions || ''}
                   onChange={(e) => handleDynamicFieldChange('dimensions', e.target.value)}
-                  placeholder="Например: 560*200*140"
+                  placeholder="Например: 120*60*75"
                   className="w-full text-xs p-2.5 border border-slate-300 rounded-xl font-mono bg-white outline-none focus:ring-2 focus:ring-indigo-500"
                 />
-                {isFurniture && (
-                  <p className="text-[11px] text-indigo-700 mt-1">
-                    Указывайте в формате Длина*Ширина*Высота в сантиметрах (например, 560*200*140). Система автоматически разберет габариты для фильтрации.
-                  </p>
-                )}
+                <p className="text-[11px] text-slate-500 mt-1">
+                  Формат: Длина*Ширина*Высота в см — применяется к любым записям и доступен в фильтре.
+                </p>
               </div>
 
               <div>
@@ -620,50 +622,54 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Гарантия истекает (дата)
                 </label>
-                <input
-                  type="date"
-                  value={warrantyUntilVal}
-                  onChange={(e) => handleDynamicFieldChange('warranty_until', e.target.value || null)}
-                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none"
-                />
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="date"
+                    value={warrantyUntilVal}
+                    onChange={(e) => handleDynamicFieldChange('warranty_until', e.target.value || null)}
+                    className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none"
+                  />
+                  {warrantyUntilVal && (
+                    <button
+                      type="button"
+                      onClick={() => handleDynamicFieldChange('warranty_until', null)}
+                      className="px-2.5 py-2.5 text-xs text-slate-500 hover:text-red-600 hover:bg-red-50 border border-slate-200 rounded-xl transition-colors"
+                      title="Очистить дату окончания гарантии"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Оборудование на гарантии
+                  Статус гарантии (вычисляется по дате)
                 </label>
-                {warrantyUntilVal ? (
-                  <div
-                    className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
-                      computedWarrantyActive
-                        ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                        : 'bg-slate-100 border-slate-200 text-slate-600'
-                    }`}
-                  >
-                    {computedWarrantyActive ? (
-                      <>
-                        <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-                        <span>Да (определено по дате окончания)</span>
-                      </>
-                    ) : (
-                      <>
-                        <ShieldAlert className="w-4 h-4 text-slate-500 shrink-0" />
-                        <span>Нет ({warrantyExpiredByDate ? 'срок гарантии истёк' : 'не на гарантии'})</span>
-                      </>
-                    )}
-                  </div>
-                ) : (
-                  <select
-                    value={additionalFieldsValues.is_under_warranty ? 'true' : 'false'}
-                    onChange={(e) =>
-                      handleDynamicFieldChange('is_under_warranty', e.target.value === 'true')
-                    }
-                    className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none bg-white"
-                  >
-                    <option value="false">Нет (истекла или неприменимо)</option>
-                    <option value="true">Да</option>
-                  </select>
-                )}
+                <div
+                  className={`p-2.5 rounded-xl border text-xs font-semibold flex items-center gap-2 ${
+                    computedWarrantyActive
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : 'bg-slate-100 border-slate-200 text-slate-600'
+                  }`}
+                >
+                  {computedWarrantyActive ? (
+                    <>
+                      <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <span>Да (действует до {warrantyUntilVal})</span>
+                    </>
+                  ) : warrantyExpiredByDate ? (
+                    <>
+                      <ShieldAlert className="w-4 h-4 text-slate-500 shrink-0" />
+                      <span>Нет (срок гарантии истёк)</span>
+                    </>
+                  ) : (
+                    <>
+                      <ShieldAlert className="w-4 h-4 text-slate-400 shrink-0" />
+                      <span>Нет (дата окончания гарантии не задана)</span>
+                    </>
+                  )}
+                </div>
               </div>
 
               <div>
@@ -737,7 +743,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
             <div className="border-t border-slate-200 pt-4 space-y-4">
               <div className="flex items-center justify-between">
                 <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wider">
-                  Дополнительные характеристики типа «{selectedTypeName}»
+                  Дополнительные характеристики (общие и типа «{selectedTypeName}»)
                 </h4>
                 <span className="text-[11px] text-slate-500">
                   {extraCustomFieldDefs.length} полей
@@ -757,6 +763,11 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
                     >
                       <label className="block text-xs font-semibold text-slate-800 mb-1">
                         {field.title} {field.is_required && <span className="text-red-500">*</span>}
+                        {field.type_id === null && (
+                          <span className="ml-1.5 px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-semibold">
+                            Общая
+                          </span>
+                        )}
                         <span className="text-[10px] font-mono text-slate-400 ml-1">
                           ({field.code})
                         </span>

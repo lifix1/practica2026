@@ -807,11 +807,15 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                       >
                         {data.additional_fields?.is_under_warranty ? 'Да' : 'Нет'}
                       </span>
-                      {data.additional_fields?.warranty_until && (
+                      {data.additional_fields?.warranty_until ? (
                         <span className="text-slate-500 ml-2">
                           (Срок до:{' '}
                           {new Date(data.additional_fields.warranty_until).toLocaleDateString('ru-RU')}
                           {data.additional_fields?.warranty_expired && ' — срок истёк'})
+                        </span>
+                      ) : (
+                        <span className="text-slate-400 ml-2">
+                          (дата истечения гарантии не задана)
                         </span>
                       )}
                     </div>
@@ -842,7 +846,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                 ).length > 0 && (
                 <div className="border-t border-slate-100 pt-5 space-y-3">
                   <h4 className="text-xs font-bold uppercase text-slate-500 tracking-wider">
-                    Специфические характеристики типа «{data.typeName}»
+                    Дополнительные характеристики (общие и типа «{data.typeName}»)
                   </h4>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {data.fieldsDefinitions
@@ -852,9 +856,16 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                         key={field.code}
                         className="p-3 rounded-xl border border-slate-200 bg-white"
                       >
-                        <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
-                          <span>{field.title}</span>
-                          <span className="font-mono text-[10px] text-slate-400">
+                        <div className="flex items-center justify-between gap-2 text-xs text-slate-500 mb-1">
+                          <span className="flex items-center gap-1.5 flex-wrap">
+                            <span>{field.title}</span>
+                            {field.type_id === null && (
+                              <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 text-[10px] font-semibold">
+                                Общая
+                              </span>
+                            )}
+                          </span>
+                          <span className="font-mono text-[10px] text-slate-400 shrink-0">
                             {field.code}
                           </span>
                         </div>

@@ -62,7 +62,7 @@ import {
   encodeGroupQrToken,
 } from './src/server/qr-token.ts';
 import { seedDatabaseIfEmpty } from './src/db/seed.ts';
-import { and, desc, eq, gte, ilike, inArray, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, ilike, inArray, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
 import path from 'path';
 
 dotenv.config();
@@ -881,6 +881,47 @@ app.get('/api/equipment-types', requireAuth, async (_req, res) => {
   }
 });
 
+const MAX_TYPE_DEPTH = 10;
+
+function getTypeDepth(
+  typeId: number,
+  typeMap: Map<number, { id: number; parent_id: number | null }>
+): number {
+  let depth = 0;
+  let curr: number | null = typeId;
+  const visited = new Set<number>();
+
+  while (curr !== null && !visited.has(curr)) {
+    const rec = typeMap.get(curr);
+    if (!rec) break;
+    visited.add(curr);
+    depth += 1;
+    curr =
+      rec.parent_id !== null && rec.parent_id !== undefined
+        ? Number(rec.parent_id)
+        : null;
+  }
+
+  return depth;
+}
+
+function getSubtreeHeight(
+  typeId: number,
+  childrenMap: Map<number, number[]>,
+  visited = new Set<number>()
+): number {
+  if (visited.has(typeId)) return 1;
+  visited.add(typeId);
+  const children = childrenMap.get(typeId) || [];
+  let maxChild = 0;
+  for (const childId of children) {
+    const h = getSubtreeHeight(childId, childrenMap, visited);
+    if (h > maxChild) maxChild = h;
+  }
+  visited.delete(typeId);
+  return 1 + maxChild;
+}
+
 // Create Equipment Type (Admin only)
 app.post('/api/equipment-types', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
@@ -889,11 +930,44 @@ app.post('/api/equipment-types', requireAuth, requireRole('ADMIN'), async (req, 
       return res.status(400).json({ error: 'Название типа оборудования обязательно' });
     }
 
+    const parsedParentId =
+      parent_id !== undefined && parent_id !== '' && parent_id !== null
+        ? Number(parent_id)
+        : null;
+
+    if (parsedParentId !== null) {
+      if (!Number.isInteger(parsedParentId) || parsedParentId <= 0) {
+        return res.status(400).json({ error: 'Некорректный идентификатор родительского типа' });
+      }
+
+      const allTypes = await db
+        .select({ id: equipmentTypes.id, parent_id: equipmentTypes.parent_id })
+        .from(equipmentTypes);
+      const typeMap = new Map<number, { id: number; parent_id: number | null }>();
+      for (const t of allTypes) {
+        typeMap.set(Number(t.id), {
+          id: Number(t.id),
+          parent_id: t.parent_id !== null && t.parent_id !== undefined ? Number(t.parent_id) : null,
+        });
+      }
+
+      if (!typeMap.has(parsedParentId)) {
+        return res.status(400).json({ error: 'Выбранный родительский тип оборудования не найден' });
+      }
+
+      const parentDepth = getTypeDepth(parsedParentId, typeMap);
+      if (parentDepth >= MAX_TYPE_DEPTH) {
+        return res.status(400).json({
+          error: `Достигнута максимальная глубина вложения типов (${MAX_TYPE_DEPTH} уровней)`,
+        });
+      }
+    }
+
     const [newType] = await db
       .insert(equipmentTypes)
       .values({
         name: name.trim(),
-        parent_id: parent_id ? Number(parent_id) : null,
+        parent_id: parsedParentId,
       })
       .returning();
 
@@ -952,7 +1026,27 @@ app.put('/api/equipment-types/:id', requireAuth, requireRole('ADMIN'), async (re
     }
 
     if (newParentId) {
-      const allTypes = await db.select().from(equipmentTypes);
+      const allTypes = await db
+        .select({ id: equipmentTypes.id, parent_id: equipmentTypes.parent_id })
+        .from(equipmentTypes);
+      const typeMap = new Map<number, { id: number; parent_id: number | null }>();
+      const childrenMap = new Map<number, number[]>();
+
+      for (const t of allTypes) {
+        const idNum = Number(t.id);
+        const pidNum = t.parent_id !== null && t.parent_id !== undefined ? Number(t.parent_id) : null;
+        typeMap.set(idNum, { id: idNum, parent_id: pidNum });
+        if (pidNum !== null) {
+          const arr = childrenMap.get(pidNum) || [];
+          arr.push(idNum);
+          childrenMap.set(pidNum, arr);
+        }
+      }
+
+      if (!typeMap.has(newParentId)) {
+        return res.status(400).json({ error: 'Выбранный родительский тип не найден' });
+      }
+
       let curr: number | null = newParentId;
       const visited = new Set<number>();
       while (curr) {
@@ -963,8 +1057,75 @@ app.put('/api/equipment-types/:id', requireAuth, requireRole('ADMIN'), async (re
         }
         if (visited.has(curr)) break;
         visited.add(curr);
-        const parentRecord = allTypes.find((t: any) => t.id === curr);
-        curr = parentRecord?.parent_id ? Number(parentRecord.parent_id) : null;
+        const parentRecord = typeMap.get(curr);
+        curr = parentRecord?.parent_id ?? null;
+      }
+
+      const newParentDepth = getTypeDepth(newParentId, typeMap);
+      const subtreeHeight = getSubtreeHeight(typeId, childrenMap);
+      if (newParentDepth + subtreeHeight > MAX_TYPE_DEPTH) {
+        return res.status(400).json({
+          error: `Невозможно назначить родительский тип: глубина вложенности с учётом дочерних подтипов превысит ${MAX_TYPE_DEPTH} уровней`,
+        });
+      }
+
+      // Ensure moving this subtree under newParentId won't introduce duplicate JSON field codes across parent-child chains
+      const subtreeTypeIds = new Set<number>([typeId]);
+      const subQueue = [typeId];
+      while (subQueue.length > 0) {
+        const cur = subQueue.shift()!;
+        for (const ch of childrenMap.get(cur) || []) {
+          if (!subtreeTypeIds.has(ch)) {
+            subtreeTypeIds.add(ch);
+            subQueue.push(ch);
+          }
+        }
+      }
+
+      const ancestorTypeIds = new Set<number>();
+      let ancCurr: number | null = newParentId;
+      while (ancCurr !== null && !ancestorTypeIds.has(ancCurr)) {
+        ancestorTypeIds.add(ancCurr);
+        ancCurr = typeMap.get(ancCurr)?.parent_id ?? null;
+      }
+
+      const combinedIds = Array.from(new Set([...subtreeTypeIds, ...ancestorTypeIds]));
+      if (combinedIds.length > 0) {
+        const activeFieldsInBranch = await db
+          .select({
+            type_id: additionalFields.type_id,
+            code: additionalFields.code,
+            title: additionalFields.title,
+          })
+          .from(additionalFields)
+          .where(
+            and(
+              inArray(additionalFields.type_id, combinedIds),
+              eq(additionalFields.is_active, true)
+            )
+          );
+
+        const ancestorCodeMap = new Map<string, { typeId: number; title: string; code: string }>();
+        for (const f of activeFieldsInBranch) {
+          if (ancestorTypeIds.has(Number(f.type_id))) {
+            ancestorCodeMap.set(f.code.trim().toLowerCase(), {
+              typeId: Number(f.type_id),
+              title: f.title,
+              code: f.code,
+            });
+          }
+        }
+
+        for (const f of activeFieldsInBranch) {
+          if (subtreeTypeIds.has(Number(f.type_id))) {
+            const clash = ancestorCodeMap.get(f.code.trim().toLowerCase());
+            if (clash) {
+              return res.status(400).json({
+                error: `Невозможно переместить тип: код JSON «${f.code}» («${f.title}») конфликтует с одноимённой характеристикой родительской ветви («${clash.title}»).`,
+              });
+            }
+          }
+        }
       }
     }
 
@@ -1051,8 +1212,272 @@ app.get('/api/equipment-types/:id/fields', requireAuth, async (req, res) => {
   }
 });
 
+async function findFieldCodeConflictInHierarchy(
+  typeId: number,
+  rawCode: string,
+  excludeFieldId?: number
+): Promise<{
+  relation: 'self' | 'ancestor' | 'descendant' | 'global';
+  ownerTypeName: string;
+  existingTitle: string;
+  existingCode: string;
+} | null> {
+  const cleanLower = rawCode.trim().toLowerCase();
+  const allTypes = await db
+    .select({
+      id: equipmentTypes.id,
+      name: equipmentTypes.name,
+      parent_id: equipmentTypes.parent_id,
+    })
+    .from(equipmentTypes);
+
+  const byId = new Map<number, { id: number; name: string; parent_id: number | null }>();
+  const childrenByParent = new Map<number, number[]>();
+
+  for (const t of allTypes) {
+    const id = Number(t.id);
+    const pid = t.parent_id !== null && t.parent_id !== undefined ? Number(t.parent_id) : null;
+    byId.set(id, { id, name: t.name, parent_id: pid });
+    if (pid !== null) {
+      const arr = childrenByParent.get(pid) || [];
+      arr.push(id);
+      childrenByParent.set(pid, arr);
+    }
+  }
+
+  const ancestorIds = new Set<number>();
+  let curr: number | null = byId.get(typeId)?.parent_id ?? null;
+  while (curr !== null && !ancestorIds.has(curr) && ancestorIds.size < 25) {
+    ancestorIds.add(curr);
+    curr = byId.get(curr)?.parent_id ?? null;
+  }
+
+  const descendantIds = new Set<number>();
+  const descQueue = [...(childrenByParent.get(typeId) || [])];
+  while (descQueue.length > 0 && descendantIds.size < 500) {
+    const cid = descQueue.shift()!;
+    if (!descendantIds.has(cid) && cid !== typeId) {
+      descendantIds.add(cid);
+      for (const nextChild of childrenByParent.get(cid) || []) {
+        descQueue.push(nextChild);
+      }
+    }
+  }
+
+  const relatedTypeIds = Array.from(new Set([typeId, ...ancestorIds, ...descendantIds]));
+
+  const candidateFields = await db
+    .select()
+    .from(additionalFields)
+    .where(
+      and(
+        eq(additionalFields.is_active, true),
+        relatedTypeIds.length > 0
+          ? or(isNull(additionalFields.type_id), inArray(additionalFields.type_id, relatedTypeIds))
+          : isNull(additionalFields.type_id)
+      )
+    );
+
+  for (const f of candidateFields) {
+    if (excludeFieldId && Number(f.id) === excludeFieldId) continue;
+    if (String(f.code || '').trim().toLowerCase() !== cleanLower) continue;
+
+    if (f.type_id === null || f.type_id === undefined) {
+      return {
+        relation: 'global',
+        ownerTypeName: 'Общая характеристика (для всех типов)',
+        existingTitle: f.title,
+        existingCode: f.code,
+      };
+    }
+
+    const ownerId = Number(f.type_id);
+    const ownerTypeName = byId.get(ownerId)?.name || `#${ownerId}`;
+    const relation: 'self' | 'ancestor' | 'descendant' =
+      ownerId === typeId ? 'self' : ancestorIds.has(ownerId) ? 'ancestor' : 'descendant';
+
+    return {
+      relation,
+      ownerTypeName,
+      existingTitle: f.title,
+      existingCode: f.code,
+    };
+  }
+
+  return null;
+}
+
+function formatFieldCodeConflictError(
+  cleanCode: string,
+  conflict: NonNullable<Awaited<ReturnType<typeof findFieldCodeConflictInHierarchy>>>
+): string {
+  if (conflict.relation === 'global') {
+    return `Код JSON «${cleanCode}» уже занят в общей характеристике для всех типов («${conflict.existingTitle}»).`;
+  }
+  if (conflict.relation === 'self') {
+    return `Характеристика с кодом JSON «${cleanCode}» уже существует для данного типа («${conflict.existingTitle}»).`;
+  }
+  if (conflict.relation === 'ancestor') {
+    return `Код JSON «${cleanCode}» уже занят в родительском типе «${conflict.ownerTypeName}» («${conflict.existingTitle}»). Код должен быть уникальным в пределах типа и его родителей.`;
+  }
+  return `Код JSON «${cleanCode}» уже используется в дочернем подтипе «${conflict.ownerTypeName}» («${conflict.existingTitle}»). Выберите другой код.`;
+}
+
+async function findGlobalFieldCodeConflict(
+  rawCode: string,
+  excludeFieldId?: number
+): Promise<string | null> {
+  const cleanLower = rawCode.trim().toLowerCase();
+  const activeFields = await db
+    .select()
+    .from(additionalFields)
+    .where(eq(additionalFields.is_active, true));
+
+  const colliding = activeFields.find(
+    (f: any) =>
+      (!excludeFieldId || Number(f.id) !== excludeFieldId) &&
+      String(f.code || '').trim().toLowerCase() === cleanLower
+  );
+
+  if (!colliding) return null;
+
+  if (colliding.type_id === null || colliding.type_id === undefined) {
+    return `Общая характеристика с кодом JSON «${rawCode.trim()}» уже существует («${colliding.title}»).`;
+  }
+
+  const [ownerType] = await db
+    .select({ name: equipmentTypes.name })
+    .from(equipmentTypes)
+    .where(eq(equipmentTypes.id, Number(colliding.type_id)))
+    .limit(1);
+
+  return `Код JSON «${rawCode.trim()}» уже используется в типе «${ownerType?.name || `#${colliding.type_id}`}» («${colliding.title}»). Выберите уникальный код для общей характеристики.`;
+}
+
+// Global Additional Fields (present on all equipment types)
+app.get('/api/additional-fields/global', requireAuth, async (_req, res) => {
+  try {
+    const fields = await db
+      .select()
+      .from(additionalFields)
+      .where(and(isNull(additionalFields.type_id), eq(additionalFields.is_active, true)))
+      .orderBy(asc(additionalFields.id));
+    res.json(fields);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/additional-fields/global', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const { code, title, data_type, is_required, is_multiple, options } = req.body;
+    if (!code || !String(code).trim() || !title || !String(title).trim() || !data_type) {
+      return res.status(400).json({ error: 'Код, название и тип данных обязательны' });
+    }
+
+    const cleanCode = String(code).trim();
+    if (data_type === 'ENUM') {
+      if (!options || !Array.isArray(options) || options.length === 0) {
+        return res.status(400).json({ error: 'Для типа ENUM необходимо указать хотя бы 1 вариант значений' });
+      }
+    }
+
+    const conflictError = await findGlobalFieldCodeConflict(cleanCode);
+    if (conflictError) {
+      return res.status(400).json({ error: conflictError });
+    }
+
+    const [createdField] = await db
+      .insert(additionalFields)
+      .values({
+        type_id: null,
+        code: cleanCode,
+        title: String(title).trim(),
+        data_type,
+        is_required: Boolean(is_required),
+        is_multiple: Boolean(is_multiple),
+        options: data_type === 'ENUM' ? options : null,
+        is_active: true,
+      })
+      .returning();
+
+    res.status(201).json(createdField);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/additional-fields/global/:fieldId', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const fieldId = Number(req.params.fieldId);
+    if (!Number.isInteger(fieldId) || fieldId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор характеристики' });
+    }
+    const { code, title, data_type, is_required, is_multiple, options } = req.body;
+    if (!code || !String(code).trim() || !title || !String(title).trim() || !data_type) {
+      return res.status(400).json({ error: 'Код, название и тип данных обязательны' });
+    }
+
+    const cleanCode = String(code).trim();
+    if (data_type === 'ENUM') {
+      if (!options || !Array.isArray(options) || options.length === 0) {
+        return res.status(400).json({ error: 'Для типа ENUM необходимо указать хотя бы 1 вариант значений' });
+      }
+    }
+
+    const [existing] = await db
+      .select()
+      .from(additionalFields)
+      .where(and(eq(additionalFields.id, fieldId), isNull(additionalFields.type_id)))
+      .limit(1);
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Общая характеристика не найдена' });
+    }
+
+    const conflictError = await findGlobalFieldCodeConflict(cleanCode, fieldId);
+    if (conflictError) {
+      return res.status(400).json({ error: conflictError });
+    }
+
+    const [updatedField] = await db
+      .update(additionalFields)
+      .set({
+        code: cleanCode,
+        title: String(title).trim(),
+        data_type,
+        is_required: Boolean(is_required),
+        is_multiple: Boolean(is_multiple),
+        options: data_type === 'ENUM' ? options : null,
+      })
+      .where(eq(additionalFields.id, fieldId))
+      .returning();
+
+    res.json(updatedField);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/additional-fields/global/:fieldId', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const fieldId = Number(req.params.fieldId);
+    if (!Number.isInteger(fieldId) || fieldId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор характеристики' });
+    }
+    await db
+      .update(additionalFields)
+      .set({ is_active: false })
+      .where(and(eq(additionalFields.id, fieldId), isNull(additionalFields.type_id)));
+
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Create Additional Field (Admin only)
-// Spec: "Если тип ENUM, то в options обязательно хотя бы 1 значение; иначе NULL. code поля должен быть уникальным в пределах type_id."
+// Spec: "Если тип ENUM, то в options обязательно хотя бы 1 значение; иначе NULL. code поля должен быть уникальным в пределах type_id и всей его ветви предков/потомков."
 app.post('/api/equipment-types/:id/fields', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
     const typeId = Number(req.params.id);
@@ -1061,9 +1486,11 @@ app.post('/api/equipment-types/:id/fields', requireAuth, requireRole('ADMIN'), a
     }
     const { code, title, data_type, is_required, is_multiple, options } = req.body;
 
-    if (!code || !title || !data_type) {
+    if (!code || !String(code).trim() || !title || !String(title).trim() || !data_type) {
       return res.status(400).json({ error: 'Код, название и тип данных обязательны' });
     }
+
+    const cleanCode = String(code).trim();
 
     if (data_type === 'ENUM') {
       if (!options || !Array.isArray(options) || options.length === 0) {
@@ -1071,28 +1498,19 @@ app.post('/api/equipment-types/:id/fields', requireAuth, requireRole('ADMIN'), a
       }
     }
 
-    // Check unique code within type_id
-    const existing = await db
-      .select()
-      .from(additionalFields)
-      .where(
-        and(
-          eq(additionalFields.type_id, typeId),
-          eq(additionalFields.code, code.trim()),
-          eq(additionalFields.is_active, true)
-        )
-      );
-
-    if (existing.length > 0) {
-      return res.status(400).json({ error: `Характеристика с кодом "${code}" уже существует для данного типа` });
+    const conflict = await findFieldCodeConflictInHierarchy(typeId, cleanCode);
+    if (conflict) {
+      return res.status(400).json({
+        error: formatFieldCodeConflictError(cleanCode, conflict),
+      });
     }
 
     const [createdField] = await db
       .insert(additionalFields)
       .values({
         type_id: typeId,
-        code: code.trim(),
-        title: title.trim(),
+        code: cleanCode,
+        title: String(title).trim(),
         data_type: data_type,
         is_required: Boolean(is_required),
         is_multiple: Boolean(is_multiple),
@@ -1117,9 +1535,11 @@ app.put('/api/equipment-types/:typeId/fields/:fieldId', requireAuth, requireRole
     }
     const { code, title, data_type, is_required, is_multiple, options } = req.body;
 
-    if (!code || !title || !data_type) {
+    if (!code || !String(code).trim() || !title || !String(title).trim() || !data_type) {
       return res.status(400).json({ error: 'Код, название и тип данных обязательны' });
     }
+
+    const cleanCode = String(code).trim();
 
     if (data_type === 'ENUM') {
       if (!options || !Array.isArray(options) || options.length === 0) {
@@ -1138,30 +1558,19 @@ app.put('/api/equipment-types/:typeId/fields/:fieldId', requireAuth, requireRole
       return res.status(404).json({ error: 'Характеристика не найдена' });
     }
 
-    // Check unique code within type_id (if code was changed)
-    if (code.trim() !== existing.code) {
-      const duplicate = await db
-        .select()
-        .from(additionalFields)
-        .where(
-          and(
-            eq(additionalFields.type_id, typeId),
-            eq(additionalFields.code, code.trim()),
-            eq(additionalFields.is_active, true),
-            sql`${additionalFields.id} != ${fieldId}`
-          )
-        );
-
-      if (duplicate.length > 0) {
-        return res.status(400).json({ error: `Характеристика с кодом "${code}" уже существует для данного типа` });
-      }
+    // Check unique code across this type, ancestors and descendants
+    const conflict = await findFieldCodeConflictInHierarchy(typeId, cleanCode, fieldId);
+    if (conflict) {
+      return res.status(400).json({
+        error: formatFieldCodeConflictError(cleanCode, conflict),
+      });
     }
 
     const [updatedField] = await db
       .update(additionalFields)
       .set({
-        code: code.trim(),
-        title: title.trim(),
+        code: cleanCode,
+        title: String(title).trim(),
         data_type: data_type,
         is_required: Boolean(is_required),
         is_multiple: Boolean(is_multiple),
@@ -1199,65 +1608,42 @@ app.delete('/api/equipment-types/:typeId/fields/:fieldId', requireAuth, requireR
 // 3. EQUIPMENT ROUTES (CRUD, Filter, Search, QR)
 // ==========================================
 
-// Helper to compute warranty and dimensions dynamically
-function computeDynamicWarranty(fields: any = {}) {
-  const now = new Date();
-  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-
-  const rawWarrantyUntil = fields.warranty_until || fields['Гарантия истекает'];
-  let formattedUntilStr: string | null = null;
-
-  if (rawWarrantyUntil) {
-    if (typeof rawWarrantyUntil === 'string') {
-      const trimmed = rawWarrantyUntil.trim();
-      const ruMatch = trimmed.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
-      const isoMatch = trimmed.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})/);
-      if (ruMatch) {
-        formattedUntilStr = `${ruMatch[3]}-${ruMatch[2].padStart(2, '0')}-${ruMatch[1].padStart(2, '0')}`;
-      } else if (isoMatch && Number(isoMatch[1]) >= 1900 && Number(isoMatch[1]) <= 2150) {
-        formattedUntilStr = `${isoMatch[1]}-${isoMatch[2].padStart(2, '0')}-${isoMatch[3].padStart(2, '0')}`;
-      } else if (/^\d{5}(\.\d+)?$/.test(trimmed)) {
-        const serial = parseFloat(trimmed);
-        if (serial >= 15000 && serial <= 80000) {
-          const d = new Date(Math.round((serial - 25569) * 86400 * 1000));
-          if (!isNaN(d.getTime())) {
-            formattedUntilStr = d.toISOString().split('T')[0];
-          }
-        }
-      } else {
-        const d = new Date(trimmed);
-        if (!isNaN(d.getTime()) && d.getFullYear() >= 1900 && d.getFullYear() <= 2150) {
-          formattedUntilStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+// Helper to normalize warranty_until and parse dimensions
+function normalizeWarrantyUntilDate(rawWarrantyUntil: any): string | null {
+  if (!rawWarrantyUntil) return null;
+  if (typeof rawWarrantyUntil === 'string') {
+    const trimmed = rawWarrantyUntil.trim();
+    if (!trimmed) return null;
+    const ruMatch = trimmed.match(/^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$/);
+    if (ruMatch) {
+      return `${ruMatch[3]}-${ruMatch[2].padStart(2, '0')}-${ruMatch[1].padStart(2, '0')}`;
+    }
+    const isoMatch = trimmed.match(/^(\d{4})[./-](\d{1,2})[./-](\d{1,2})/);
+    if (isoMatch && Number(isoMatch[1]) >= 1900 && Number(isoMatch[1]) <= 2150) {
+      return `${isoMatch[1]}-${isoMatch[2].padStart(2, '0')}-${isoMatch[3].padStart(2, '0')}`;
+    }
+    if (/^\d{5}(\.\d+)?$/.test(trimmed)) {
+      const serial = parseFloat(trimmed);
+      if (serial >= 15000 && serial <= 80000) {
+        const d = new Date(Math.round((serial - 25569) * 86400 * 1000));
+        if (!isNaN(d.getTime())) {
+          return d.toISOString().split('T')[0];
         }
       }
-    } else if (rawWarrantyUntil instanceof Date && !isNaN(rawWarrantyUntil.getTime())) {
-      formattedUntilStr = `${rawWarrantyUntil.getFullYear()}-${String(rawWarrantyUntil.getMonth() + 1).padStart(2, '0')}-${String(rawWarrantyUntil.getDate()).padStart(2, '0')}`;
     }
+    const d = new Date(trimmed);
+    if (!isNaN(d.getTime()) && d.getFullYear() >= 1900 && d.getFullYear() <= 2150) {
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+    return null;
   }
-
-  let isUnderWarranty = false;
-  let warrantyExpired = false;
-
-  if (formattedUntilStr) {
-    // Active through the expiration day; flips to "Нет" on the very next day
-    if (todayStr > formattedUntilStr) {
-      isUnderWarranty = false;
-      warrantyExpired = true;
-    } else {
-      isUnderWarranty = true;
-      warrantyExpired = false;
-    }
-  } else {
-    const flag = fields.is_under_warranty ?? fields['Оборудование на гарантии'];
-    if (flag === true || String(flag).toLowerCase() === 'да' || String(flag).toLowerCase() === 'true') {
-      isUnderWarranty = true;
-      warrantyExpired = false;
-    } else {
-      isUnderWarranty = false;
-      warrantyExpired = true;
-    }
+  if (rawWarrantyUntil instanceof Date && !isNaN(rawWarrantyUntil.getTime())) {
+    return `${rawWarrantyUntil.getFullYear()}-${String(rawWarrantyUntil.getMonth() + 1).padStart(2, '0')}-${String(rawWarrantyUntil.getDate()).padStart(2, '0')}`;
   }
+  return null;
+}
 
+function parseDimensionsForStorage(fields: any = {}) {
   const rawDim = fields.dimensions || fields['Размеры (Д*Ш*В), см'];
   let length_cm: number | null = fields.length_cm ? Number(fields.length_cm) : null;
   let width_cm: number | null = fields.width_cm ? Number(fields.width_cm) : null;
@@ -1278,14 +1664,67 @@ function computeDynamicWarranty(fields: any = {}) {
   }
 
   return {
-    ...fields,
     dimensions:
       (rawDim && String(rawDim).trim()) ||
       (length_cm && width_cm && height_cm ? `${length_cm}*${width_cm}*${height_cm}` : null),
     length_cm,
     width_cm,
     height_cm,
-    warranty_until: formattedUntilStr || fields.warranty_until || null,
+  };
+}
+
+// Store only warranty_until (warranty status is derived dynamically on read)
+function prepareAdditionalFieldsForStorage(fields: any = {}) {
+  const clean: Record<string, any> = { ...fields };
+  const rawWarrantyUntil = clean.warranty_until || clean['Гарантия истекает'];
+  const formattedUntilStr = normalizeWarrantyUntilDate(rawWarrantyUntil);
+
+  delete clean.is_under_warranty;
+  delete clean.warranty_status_ru;
+  delete clean.warranty_expired;
+  delete clean['Оборудование на гарантии'];
+  delete clean['Гарантия истекает'];
+
+  const dimData = parseDimensionsForStorage(clean);
+
+  return {
+    ...clean,
+    ...dimData,
+    warranty_until: formattedUntilStr,
+  };
+}
+
+// Compute warranty status strictly from warranty_until + parsed dimensions on read
+function computeDynamicWarranty(fields: any = {}) {
+  const now = new Date();
+  const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+
+  const rawWarrantyUntil = fields.warranty_until || fields['Гарантия истекает'];
+  const formattedUntilStr = normalizeWarrantyUntilDate(rawWarrantyUntil);
+
+  let isUnderWarranty = false;
+  let warrantyExpired = false;
+
+  if (formattedUntilStr) {
+    // Active when expiration date >= current date; not under warranty if < current date
+    if (formattedUntilStr < todayStr) {
+      isUnderWarranty = false;
+      warrantyExpired = true;
+    } else {
+      isUnderWarranty = true;
+      warrantyExpired = false;
+    }
+  } else {
+    isUnderWarranty = false;
+    warrantyExpired = false;
+  }
+
+  const dimData = parseDimensionsForStorage(fields);
+
+  return {
+    ...fields,
+    ...dimData,
+    warranty_until: formattedUntilStr || null,
     is_under_warranty: isUnderWarranty,
     warranty_status_ru: isUnderWarranty ? 'Да' : 'Нет',
     warranty_expired: warrantyExpired,
@@ -1312,6 +1751,8 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
     const transferredTo = !isRegularUser && req.query.transferred_to ? String(req.query.transferred_to).trim() : undefined;
     const customFieldCode = req.query.custom_field_code ? String(req.query.custom_field_code).trim() : undefined;
     const customFieldValue = req.query.custom_field_value ? String(req.query.custom_field_value).trim() : undefined;
+    const customFieldMin = req.query.custom_field_min ? String(req.query.custom_field_min).trim() : undefined;
+    const customFieldMax = req.query.custom_field_max ? String(req.query.custom_field_max).trim() : undefined;
 
     // Additional department filters
     const colorFilter = req.query.color ? String(req.query.color).trim().toLowerCase() : undefined;
@@ -1573,16 +2014,100 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
       });
     }
 
-    if (customFieldCode && customFieldValue) {
-      filtered = filtered.filter((item: any) => {
-        const val = item.additional_fields?.[customFieldCode];
-        if (val === undefined || val === null) return false;
-        if (Array.isArray(val)) {
-          return val.some((v: any) =>
-            String(v).toLowerCase().includes(customFieldValue.toLowerCase())
-          );
+    if (customFieldCode && (customFieldValue || customFieldMin || customFieldMax)) {
+      let fieldDataType: string | undefined;
+      if (typeId && Number.isInteger(typeId) && typeId > 0) {
+        const typeDefs = await getAllAdditionalFieldsForType(typeId);
+        fieldDataType = typeDefs.find((f) => f.code === customFieldCode)?.data_type;
+      }
+      if (!fieldDataType) {
+        const [matchedDef] = await db
+          .select({ data_type: additionalFields.data_type })
+          .from(additionalFields)
+          .where(and(eq(additionalFields.code, customFieldCode), eq(additionalFields.is_active, true)))
+          .limit(1);
+        fieldDataType = matchedDef?.data_type;
+      }
+
+      const parseNum = (v: any): number | null => {
+        if (v === undefined || v === null || v === '' || typeof v === 'boolean') return null;
+        const n = typeof v === 'number' ? v : Number(String(v).trim().replace(',', '.'));
+        return Number.isFinite(n) ? n : null;
+      };
+
+      const normalizeYmd = (v: any): string | null => {
+        if (v === undefined || v === null || v === '') return null;
+        if (v instanceof Date && !isNaN(v.getTime())) {
+          return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
         }
-        return String(val).toLowerCase().includes(customFieldValue.toLowerCase());
+        const str = String(v).trim();
+        const isoMatch = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (isoMatch) return `${isoMatch[1]}-${isoMatch[2]}-${isoMatch[3]}`;
+        const ruMatch = str.match(/^(\d{2})\.(\d{2})\.(\d{4})/);
+        if (ruMatch) return `${ruMatch[3]}-${ruMatch[2]}-${ruMatch[1]}`;
+        const parsed = new Date(str);
+        if (!isNaN(parsed.getTime())) {
+          return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}-${String(parsed.getDate()).padStart(2, '0')}`;
+        }
+        return null;
+      };
+
+      const isDateField =
+        fieldDataType === 'DATE' ||
+        (!fieldDataType &&
+          Boolean(
+            (customFieldMin && /^\d{4}-\d{2}-\d{2}$/.test(customFieldMin)) ||
+              (customFieldMax && /^\d{4}-\d{2}-\d{2}$/.test(customFieldMax))
+          ));
+      const isNumericField =
+        fieldDataType === 'NUMBER' ||
+        fieldDataType === 'INTEGER' ||
+        (!fieldDataType && !isDateField && Boolean(customFieldMin || customFieldMax));
+
+      filtered = filtered.filter((item: any) => {
+        const rawVal = item.additional_fields?.[customFieldCode];
+        if (rawVal === undefined || rawVal === null || rawVal === '') return false;
+        const values = Array.isArray(rawVal) ? rawVal : [rawVal];
+        if (values.length === 0) return false;
+
+        if (isDateField && (customFieldMin || customFieldMax)) {
+          const minYmd = customFieldMin ? normalizeYmd(customFieldMin) : null;
+          const maxYmd = customFieldMax ? normalizeYmd(customFieldMax) : null;
+          return values.some((v: any) => {
+            const itemYmd = normalizeYmd(v);
+            if (!itemYmd) return false;
+            if (minYmd && itemYmd < minYmd) return false;
+            if (maxYmd && itemYmd > maxYmd) return false;
+            return true;
+          });
+        }
+
+        if (isNumericField && (customFieldMin || customFieldMax)) {
+          const minNum = customFieldMin ? parseNum(customFieldMin) : null;
+          const maxNum = customFieldMax ? parseNum(customFieldMax) : null;
+          return values.some((v: any) => {
+            const n = parseNum(v);
+            if (n === null) return false;
+            if (minNum !== null && n < minNum) return false;
+            if (maxNum !== null && n > maxNum) return false;
+            return true;
+          });
+        }
+
+        if (fieldDataType === 'BOOLEAN' && customFieldValue) {
+          const wantBool = customFieldValue === 'true' || customFieldValue === '1' || customFieldValue.toLowerCase() === 'да';
+          return values.some((v: any) => {
+            const b = v === true || v === 'true' || v === '1' || String(v).toLowerCase() === 'да';
+            return b === wantBool;
+          });
+        }
+
+        if (customFieldValue) {
+          const needle = customFieldValue.toLowerCase();
+          return values.some((v: any) => String(v).toLowerCase().includes(needle));
+        }
+
+        return true;
       });
     }
 
@@ -1629,7 +2154,6 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
       'Состояние',
       'Категория (по бухучету)',
       'Содержание драгметаллов',
-      'Оборудование на гарантии',
       'Гарантия истекает',
       'Примечание',
     ];
@@ -1651,7 +2175,6 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
         'Состояние': 'Рабочее',
         'Категория (по бухучету)': 'Дорогостоящее',
         'Содержание драгметаллов': 'Да',
-        'Оборудование на гарантии': 'Нет',
         'Гарантия истекает': '',
         'Примечание': '',
       },
@@ -1671,7 +2194,6 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
         'Состояние': 'Рабочее',
         'Категория (по бухучету)': 'Дорогостоящее',
         'Содержание драгметаллов': 'Нет',
-        'Оборудование на гарантии': 'Нет',
         'Гарантия истекает': '',
         'Примечание': '',
       },
@@ -1691,7 +2213,6 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
         'Состояние': 'Рабочее',
         'Категория (по бухучету)': 'Дорогостоящее',
         'Содержание драгметаллов': 'Нет',
-        'Оборудование на гарантии': 'Нет',
         'Гарантия истекает': '',
         'Примечание': '',
       },
@@ -1711,7 +2232,6 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
         'Состояние': 'Рабочее',
         'Категория (по бухучету)': 'Дорогостоящее',
         'Содержание драгметаллов': 'Да',
-        'Оборудование на гарантии': 'Да',
         'Гарантия истекает': '12.05.2027',
         'Примечание': '',
       },
@@ -1731,7 +2251,6 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
         'Состояние': 'Рабочее',
         'Категория (по бухучету)': 'Дорогостоящее',
         'Содержание драгметаллов': 'Да',
-        'Оборудование на гарантии': 'Нет',
         'Гарантия истекает': '',
         'Примечание': '',
       },
@@ -1751,7 +2270,6 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
         'Состояние': 'Рабочее',
         'Категория (по бухучету)': 'Малоценка',
         'Содержание драгметаллов': 'Нет',
-        'Оборудование на гарантии': 'Нет',
         'Гарантия истекает': '',
         'Примечание': '',
       },
@@ -2156,7 +2674,7 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       });
     }
 
-    const normalizedFields = computeDynamicWarranty(normalizedInputFields);
+    const normalizedFields = prepareAdditionalFieldsForStorage(normalizedInputFields);
 
     const [created] = await db
       .insert(equipment)
@@ -2190,7 +2708,10 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       },
     });
 
-    res.status(201).json(created);
+    res.status(201).json({
+      ...created,
+      additional_fields: computeDynamicWarranty(created.additional_fields),
+    });
   } catch (error: any) {
     console.error('Create equipment error:', error);
     res.status(500).json({ error: formatEquipmentDbError(error) });
@@ -2353,7 +2874,7 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
     }
     if (room_id !== undefined) updateData.room_id = Number(room_id);
     if (additional_fields !== undefined) {
-      updateData.additional_fields = computeDynamicWarranty(additional_fields);
+      updateData.additional_fields = prepareAdditionalFieldsForStorage(additional_fields);
     }
 
     const [updated] = await db
@@ -2391,7 +2912,10 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
       },
     });
 
-    res.json(updated);
+    res.json({
+      ...updated,
+      additional_fields: computeDynamicWarranty(updated.additional_fields),
+    });
   } catch (error: any) {
     console.error('Update equipment error:', error);
     res.status(500).json({ error: formatEquipmentDbError(error) });
@@ -3009,9 +3533,6 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       }
     }
 
-    const now = new Date();
-    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-
     interface ParsedImportRow {
       rowIndex: number;
       rawInvNum: string;
@@ -3086,7 +3607,6 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       const conditionRaw = getVal('condition', 'Состояние');
       const categoryRaw = getVal('accounting_category', 'Категория (по бухучету)', 'Категория');
       const preciousRaw = getVal('precious_metals', 'Содержание драгметаллов', 'Драгметаллы');
-      const warrantyRaw = getVal('is_under_warranty', 'Оборудование на гарантии', 'На гарантии');
       const warrantyUntilRaw = getVal('warranty_until', 'Гарантия истекает', 'Срок гарантии до');
       const notes = getVal('notes', 'Примечание', 'Примечания');
       const quantityRaw = getVal('Количество', 'Кол-во', 'quantity');
@@ -3186,15 +3706,8 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       }
 
       let formattedWarrantyUntil: string | null = null;
-      let isUnderWarranty = false;
       if (warrantyUntilRaw) {
         formattedWarrantyUntil = parseExcelDate(warrantyUntilRaw);
-      }
-      if (formattedWarrantyUntil) {
-        isUnderWarranty = todayStr <= formattedWarrantyUntil;
-      } else {
-        const lowerW = warrantyRaw.toLowerCase();
-        isUnderWarranty = lowerW === 'да' || lowerW === 'true' || lowerW === '1';
       }
 
       const preciousMetals =
@@ -3229,7 +3742,6 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         condition,
         accounting_category,
         precious_metals: preciousMetals,
-        is_under_warranty: isUnderWarranty,
         warranty_until: formattedWarrantyUntil,
         notes: notes || null,
       };

@@ -3,11 +3,11 @@ import {
   additionalFields,
   equipmentTypes,
 } from '../db/schema.ts';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, or } from 'drizzle-orm';
 
 export interface FieldDefinition {
   id: number;
-  type_id: number;
+  type_id: number | null;
   code: string;
   title: string;
   data_type: 'STRING' | 'INTEGER' | 'NUMBER' | 'BOOLEAN' | 'DATE' | 'ENUM';
@@ -17,15 +17,17 @@ export interface FieldDefinition {
   is_active: boolean;
 }
 
-// Recursively fetch all active additional fields for a type including all parent types
+// Recursively fetch all active additional fields for a type including global fields and all parent types
 export async function getAllAdditionalFieldsForType(
   typeId: number
 ): Promise<FieldDefinition[]> {
   const typeIdsToSearch: number[] = [];
+  const visited = new Set<number>();
   let currentId: number | null = typeId;
 
-  // Walk up the hierarchy
-  while (currentId !== null) {
+  // Walk up the hierarchy (guarded against cycles and deep chains)
+  while (currentId !== null && !visited.has(currentId) && visited.size < 20) {
+    visited.add(currentId);
     typeIdsToSearch.push(currentId);
     const foundTypes: any[] = await db
       .select()
@@ -37,22 +39,19 @@ export async function getAllAdditionalFieldsForType(
     if (!foundType || !foundType.parent_id) {
       break;
     }
-    currentId = foundType.parent_id;
+    currentId = Number(foundType.parent_id);
   }
 
-  if (typeIdsToSearch.length === 0) {
-    return [];
-  }
+  const typeScopeCondition =
+    typeIdsToSearch.length > 0
+      ? or(isNull(additionalFields.type_id), inArray(additionalFields.type_id, typeIdsToSearch))
+      : isNull(additionalFields.type_id);
 
   const fields = await db
     .select()
     .from(additionalFields)
-    .where(
-      and(
-        inArray(additionalFields.type_id, typeIdsToSearch),
-        eq(additionalFields.is_active, true)
-      )
-    );
+    .where(and(eq(additionalFields.is_active, true), typeScopeCondition))
+    .orderBy(asc(additionalFields.id));
 
   return fields as FieldDefinition[];
 }

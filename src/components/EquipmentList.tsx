@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import type { Equipment, EquipmentType, Room, User, AdditionalField } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
+import { flattenTypeTree } from '../utils/typeTree.ts';
 import { GroupQrModal } from './GroupQrModal.tsx';
 import { QrSizeSelector, getColumnsForQrSize } from './QrSizeSelector.tsx';
 
@@ -111,6 +112,8 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
   const [typeFields, setTypeFields] = useState<AdditionalField[]>([]);
   const [customFieldCode, setCustomFieldCode] = useState('');
   const [customFieldValue, setCustomFieldValue] = useState('');
+  const [customFieldMin, setCustomFieldMin] = useState('');
+  const [customFieldMax, setCustomFieldMax] = useState('');
 
   // Bulk selection
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -143,20 +146,6 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
   const isAdmin = currentUser?.role === 'ADMIN';
   const isEngineer = currentUser?.role === 'ENGINEER';
 
-  const selectedTypeObj = (Array.isArray(types) ? types : []).find(
-    (t) => String(t.id) === selectedTypeId
-  );
-  const isFurnitureSelected = Boolean(
-    selectedTypeObj?.name.toLowerCase().includes('корпусная мебель')
-  );
-
-  // Automatically expand dimensions filter when "Корпусная мебель" is selected
-  useEffect(() => {
-    if (isFurnitureSelected) {
-      setShowDimensionsPanel(true);
-    }
-  }, [isFurnitureSelected]);
-
   const hasDimensionFilterActive = Boolean(
     lengthMin || lengthMax || widthMin || widthMax || heightMin || heightMax
   );
@@ -177,7 +166,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
       preciousMetalsFilter ||
       warrantyFilter ||
       hasDimensionFilterActive ||
-      (customFieldCode && customFieldValue)
+      (customFieldCode && (customFieldValue || customFieldMin || customFieldMax))
   );
 
   const handleResetFilters = () => {
@@ -203,6 +192,8 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
     setHeightMax('');
     setCustomFieldCode('');
     setCustomFieldValue('');
+    setCustomFieldMin('');
+    setCustomFieldMax('');
     setPage(1);
   };
 
@@ -232,9 +223,11 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
     if (widthMax) params.set('width_max', widthMax);
     if (heightMin) params.set('height_min', heightMin);
     if (heightMax) params.set('height_max', heightMax);
-    if (customFieldCode && customFieldValue) {
+    if (customFieldCode && (customFieldValue || customFieldMin || customFieldMax)) {
       params.set('custom_field_code', customFieldCode);
-      params.set('custom_field_value', customFieldValue);
+      if (customFieldValue) params.set('custom_field_value', customFieldValue);
+      if (customFieldMin) params.set('custom_field_min', customFieldMin);
+      if (customFieldMax) params.set('custom_field_max', customFieldMax);
     }
 
     apiFetch(`/api/equipment?${params.toString()}`)
@@ -274,18 +267,21 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
     heightMax,
     customFieldCode,
     customFieldValue,
+    customFieldMin,
+    customFieldMax,
     refreshKey,
   ]);
 
-  // When type changes for dynamic field filter
+  // When type changes for dynamic field filter (falls back to global characteristics when no type selected)
   useEffect(() => {
-    if (!selectedTypeId) {
-      setTypeFields([]);
-      setCustomFieldCode('');
-      setCustomFieldValue('');
-      return;
-    }
-    apiFetch(`/api/equipment-types/${selectedTypeId}/fields`)
+    setCustomFieldCode('');
+    setCustomFieldValue('');
+    setCustomFieldMin('');
+    setCustomFieldMax('');
+    const endpoint = selectedTypeId
+      ? `/api/equipment-types/${selectedTypeId}/fields`
+      : '/api/additional-fields/global';
+    apiFetch(endpoint)
       .then((r) => r.json())
       .then((fields: AdditionalField[]) => {
         const filteredFields = Array.isArray(fields)
@@ -466,16 +462,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
     }
   };
 
-  const selectFurnitureTypeQuick = () => {
-    const furn = (Array.isArray(types) ? types : []).find((t) =>
-      t.name.toLowerCase().includes('корпусная мебель')
-    );
-    if (furn) {
-      setSelectedTypeId(String(furn.id));
-      setPage(1);
-    }
-    setShowDimensionsPanel(true);
-  };
+
 
   return (
     <div className="space-y-4">
@@ -526,10 +513,10 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                   ? 'bg-indigo-50 border-indigo-300 text-indigo-700'
                   : 'border-slate-200 hover:bg-slate-50 text-slate-700'
               }`}
-              title="Фильтр по размерам корпусной мебели (Д*Ш*В)"
+              title="Фильтр по размерам оборудования (Д*Ш*В)"
             >
               <Ruler className="w-4 h-4" />
-              <span>Габариты мебели</span>
+              <span>Размеры (Д×Ш×В)</span>
               {hasDimensionFilterActive && (
                 <span className="w-2 h-2 rounded-full bg-indigo-600" />
               )}
@@ -595,9 +582,9 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
               className="w-full p-2 border border-slate-200 rounded-xl bg-slate-50/50 outline-none"
             >
               <option value="">Все типы оборудования</option>
-              {(Array.isArray(types) ? types : []).map((t) => (
+              {flattenTypeTree(types).map(({ type: t, label }) => (
                 <option key={t.id} value={t.id}>
-                  {t.name}
+                  {label}
                 </option>
               ))}
             </select>
@@ -700,7 +687,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
             >
               <option value="">Все (с гарантией и без)</option>
               <option value="true">Да (действующая гарантия)</option>
-              <option value="false">Нет (истекла / неприменимо)</option>
+              <option value="false">Нет (не задана / истекла)</option>
             </select>
           </div>
 
@@ -737,18 +724,9 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 font-bold text-indigo-950">
                 <Ruler className="w-4 h-4 text-indigo-600" />
-                <span>Фильтрация корпусной мебели по габаритам (Д × Ш × В, см)</span>
+                <span>Фильтрация по размерам (Д × Ш × В, см)</span>
               </div>
               <div className="flex items-center gap-2">
-                {!isFurnitureSelected && (
-                  <button
-                    type="button"
-                    onClick={selectFurnitureTypeQuick}
-                    className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-semibold transition-colors"
-                  >
-                    Выбрать тип «Корпусная мебель»
-                  </button>
-                )}
                 {hasDimensionFilterActive && (
                   <button
                     type="button"
@@ -897,38 +875,148 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
             </div>
 
             {/* Dynamic field filter */}
-            {typeFields.length > 0 && (
-              <div className="flex items-center gap-2">
-                <span className="font-semibold text-slate-600">Доп. поле:</span>
-                <select
-                  value={customFieldCode}
-                  onChange={(e) => {
-                    setCustomFieldCode(e.target.value);
-                    setPage(1);
-                  }}
-                  className="p-1.5 border border-slate-200 rounded-lg bg-slate-50 text-xs"
-                >
-                  <option value="">Выберите характеристику...</option>
-                  {typeFields.map((f) => (
-                    <option key={f.code} value={f.code}>
-                      {f.title}
-                    </option>
-                  ))}
-                </select>
-                {customFieldCode && (
-                  <input
-                    type="text"
-                    value={customFieldValue}
+            {typeFields.length > 0 && (() => {
+              const selectedCustomField = typeFields.find((f) => f.code === customFieldCode);
+              const fieldType = selectedCustomField?.data_type;
+              const isNumericField = fieldType === 'NUMBER' || fieldType === 'INTEGER';
+              const isDateField = fieldType === 'DATE';
+
+              return (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-semibold text-slate-600">Доп. поле:</span>
+                  <select
+                    value={customFieldCode}
                     onChange={(e) => {
-                      setCustomFieldValue(e.target.value);
+                      setCustomFieldCode(e.target.value);
+                      setCustomFieldValue('');
+                      setCustomFieldMin('');
+                      setCustomFieldMax('');
                       setPage(1);
                     }}
-                    placeholder="Значение..."
-                    className="p-1.5 border border-slate-200 rounded-lg text-xs"
-                  />
-                )}
-              </div>
-            )}
+                    className="p-1.5 border border-slate-200 rounded-lg bg-slate-50 text-xs"
+                  >
+                    <option value="">Выберите характеристику...</option>
+                    {typeFields.map((f) => (
+                      <option key={f.code} value={f.code}>
+                        {f.title}
+                      </option>
+                    ))}
+                  </select>
+
+                  {customFieldCode && isNumericField && (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-semibold text-slate-500">от</span>
+                      <input
+                        type="number"
+                        step={fieldType === 'INTEGER' ? 1 : 'any'}
+                        value={customFieldMin}
+                        onChange={(e) => {
+                          setCustomFieldMin(e.target.value);
+                          setPage(1);
+                        }}
+                        placeholder="От"
+                        className="w-24 p-1.5 border border-slate-200 rounded-lg bg-slate-50/50 outline-none text-xs"
+                      />
+                      <span className="text-slate-400">—</span>
+                      <span className="text-[11px] font-semibold text-slate-500">до</span>
+                      <input
+                        type="number"
+                        step={fieldType === 'INTEGER' ? 1 : 'any'}
+                        value={customFieldMax}
+                        onChange={(e) => {
+                          setCustomFieldMax(e.target.value);
+                          setPage(1);
+                        }}
+                        placeholder="До"
+                        className="w-24 p-1.5 border border-slate-200 rounded-lg bg-slate-50/50 outline-none text-xs"
+                      />
+                    </div>
+                  )}
+
+                  {customFieldCode && isDateField && (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[11px] font-semibold text-slate-500">с</span>
+                      <input
+                        type="date"
+                        value={customFieldMin}
+                        onChange={(e) => {
+                          setCustomFieldMin(e.target.value);
+                          setPage(1);
+                        }}
+                        className="p-1.5 border border-slate-200 rounded-lg bg-slate-50/50 outline-none text-xs"
+                      />
+                      <span className="text-[11px] font-semibold text-slate-500">по</span>
+                      <input
+                        type="date"
+                        value={customFieldMax}
+                        onChange={(e) => {
+                          setCustomFieldMax(e.target.value);
+                          setPage(1);
+                        }}
+                        className="p-1.5 border border-slate-200 rounded-lg bg-slate-50/50 outline-none text-xs"
+                      />
+                    </div>
+                  )}
+
+                  {customFieldCode && fieldType === 'BOOLEAN' && (
+                    <select
+                      value={customFieldValue}
+                      onChange={(e) => {
+                        setCustomFieldValue(e.target.value);
+                        setPage(1);
+                      }}
+                      className="p-1.5 border border-slate-200 rounded-lg bg-slate-50 text-xs"
+                    >
+                      <option value="">Любое</option>
+                      <option value="true">Да</option>
+                      <option value="false">Нет</option>
+                    </select>
+                  )}
+
+                  {customFieldCode &&
+                    fieldType === 'ENUM' &&
+                    Array.isArray(selectedCustomField?.options) &&
+                    selectedCustomField.options.length > 0 && (
+                      <select
+                        value={customFieldValue}
+                        onChange={(e) => {
+                          setCustomFieldValue(e.target.value);
+                          setPage(1);
+                        }}
+                        className="p-1.5 border border-slate-200 rounded-lg bg-slate-50 text-xs"
+                      >
+                        <option value="">Любое</option>
+                        {selectedCustomField.options.map((opt) => (
+                          <option key={opt} value={opt}>
+                            {opt}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+
+                  {customFieldCode &&
+                    !isNumericField &&
+                    !isDateField &&
+                    fieldType !== 'BOOLEAN' &&
+                    !(
+                      fieldType === 'ENUM' &&
+                      Array.isArray(selectedCustomField?.options) &&
+                      selectedCustomField.options.length > 0
+                    ) && (
+                      <input
+                        type="text"
+                        value={customFieldValue}
+                        onChange={(e) => {
+                          setCustomFieldValue(e.target.value);
+                          setPage(1);
+                        }}
+                        placeholder="Значение..."
+                        className="p-1.5 border border-slate-200 rounded-lg text-xs"
+                      />
+                    )}
+                </div>
+              );
+            })()}
           </div>
 
           {/* Quick toggle checkboxes */}
