@@ -198,6 +198,18 @@ export const auditLogs = pgTable('audit_log', {
   user_agent: text('user_agent'),
 });
 
+// 16. Table "writeoff_template" (Editable act & invoice templates + requisites)
+export const writeoffTemplates = pgTable('writeoff_template', {
+  template_key: text('template_key').primaryKey(),
+  title: text('title').notNull(),
+  description: text('description').notNull(),
+  requisites: json('requisites').$type<Record<string, any>>().notNull().default({}),
+  custom_docx_base64: text('custom_docx_base64'),
+  custom_file_name: text('custom_file_name'),
+  updated_at: timestamp('updated_at').notNull().defaultNow(),
+  updated_by: text('updated_by'),
+});
+
 // Relations
 export const usersRelations = relations(users, ({ one, many }) => ({
   refreshToken: one(refreshTokens, {

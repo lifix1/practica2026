@@ -17,6 +17,17 @@ import {
 } from 'docx';
 import QRCode from 'qrcode';
 import { encodeEquipmentQrToken, encodeGroupQrToken } from './qr-token.ts';
+import {
+  mergeRequisites,
+  type LoadedTemplateState,
+  type TemplateRequisites,
+  type WriteoffTemplateKey,
+} from './writeoff-templates.ts';
+import {
+  mergeDocxBuffers,
+  renderPerItemSectionTemplateDocx,
+  renderTableTemplateDocx,
+} from './docx-template-engine.ts';
 
 export interface EquipmentForDocx {
   id: number;
@@ -40,6 +51,8 @@ export interface WriteoffDocxOptions {
   department?: string;
   actDate?: Date | string | null;
   technicalConclusionNumber?: string;
+  requisites?: TemplateRequisites;
+  templateMode?: boolean;
 }
 
 export interface TransferInvoiceOptions {
@@ -49,6 +62,8 @@ export interface TransferInvoiceOptions {
   sender?: string;
   recipient?: string;
   note?: string;
+  requisites?: TemplateRequisites;
+  templateMode?: boolean;
 }
 
 export interface QrDocxOptions {
@@ -353,6 +368,34 @@ export async function generateQrDocx(
   const metaFontSize =
     columns === 4 ? 12 : columns === 3 ? 14 : columns === 2 ? 16 : 18;
   const imageSpacing = columns === 4 ? 40 : 80;
+  const qrWidthDxa = Math.round((qrSizeCm / 2.54) * 1440);
+  const innerPadH = columns === 4 ? 45 : 80;
+  const innerPadTop = columns === 4 ? 45 : 70;
+  const innerPadBottom = columns === 4 ? 40 : 55;
+  const maxInnerWidth = Math.max(400, cellWidth - cellMargin * 2);
+  const innerBoxWidth = Math.min(maxInnerWidth, qrWidthDxa + innerPadH * 2);
+
+  const cutFrameBorder = {
+    style: BorderStyle.SINGLE,
+    size: 8,
+    color: '1E40AF',
+  } as const;
+
+  const cutFrameTableBorders = {
+    top: cutFrameBorder,
+    bottom: cutFrameBorder,
+    left: cutFrameBorder,
+    right: cutFrameBorder,
+    insideHorizontal: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+    insideVertical: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+  } as const;
+
+  const cutFrameCellBorders = {
+    top: cutFrameBorder,
+    bottom: cutFrameBorder,
+    left: cutFrameBorder,
+    right: cutFrameBorder,
+  } as const;
 
   const tableRows: TableRow[] = [];
 
@@ -366,6 +409,57 @@ export async function generateQrDocx(
         width: qrRasterPx,
         margin: 1,
         errorCorrectionLevel: 'M',
+      });
+      const labelText = `${item.inventory_number || 'б/н'}::${item.id}`;
+
+      const qrCutBox = new Table({
+        alignment: AlignmentType.CENTER,
+        width: { size: innerBoxWidth, type: WidthType.DXA },
+        columnWidths: [innerBoxWidth],
+        borders: cutFrameTableBorders,
+        rows: [
+          new TableRow({
+            cantSplit: true,
+            children: [
+              new TableCell({
+                width: { size: innerBoxWidth, type: WidthType.DXA },
+                verticalAlign: VerticalAlign.CENTER,
+                margins: {
+                  top: innerPadTop,
+                  bottom: innerPadBottom,
+                  left: innerPadH,
+                  right: innerPadH,
+                },
+                borders: cutFrameCellBorders,
+                children: [
+                  new Paragraph({
+                    alignment: AlignmentType.CENTER,
+                    spacing: { before: 0, after: 0 },
+                    children: [
+                      new ImageRun({
+                        data: qrBuffer,
+                        transformation: { width: qrDocxPx, height: qrDocxPx },
+                        type: 'png',
+                      }),
+                    ],
+                  }),
+                  new Paragraph({
+                    alignment: AlignmentType.CENTER,
+                    spacing: { before: 0, after: 0 },
+                    children: [
+                      new TextRun({
+                        text: labelText,
+                        bold: true,
+                        size: invFontSize,
+                        color: '1E40AF',
+                      }),
+                    ],
+                  }),
+                ],
+              }),
+            ],
+          }),
+        ],
       });
 
       const cell = new TableCell({
@@ -386,6 +480,7 @@ export async function generateQrDocx(
         children: [
           new Paragraph({
             alignment: AlignmentType.CENTER,
+            spacing: { before: 0, after: imageSpacing },
             children: [
               new TextRun({
                 text: item.name,
@@ -395,36 +490,10 @@ export async function generateQrDocx(
               }),
             ],
           }),
+          qrCutBox,
           new Paragraph({
             alignment: AlignmentType.CENTER,
-            spacing: { before: imageSpacing, after: imageSpacing },
-            children: [
-              new ImageRun({
-                data: qrBuffer,
-                transformation: { width: qrDocxPx, height: qrDocxPx },
-                type: 'png',
-              }),
-            ],
-          }),
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            children: [
-              new TextRun({
-                text: 'Инв. №: ',
-                bold: true,
-                size: invFontSize,
-              }),
-              new TextRun({
-                text: item.inventory_number || 'б/н',
-                bold: true,
-                size: invFontSize,
-                color: '1E40AF',
-              }),
-            ],
-          }),
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            spacing: { before: 30 },
+            spacing: { before: imageSpacing, after: 0 },
             children: [
               new TextRun({
                 text: `Тип: ${item.typeName || 'Без типа'}${item.roomNumber ? ` | Каб. ${item.roomNumber}` : ''}`,
@@ -517,10 +586,18 @@ export function buildWriteoffCase1Sections(
   actNumber: string,
   options: WriteoffDocxOptions = {}
 ) {
-  const organization = options.organization || 'ВГУ имени П.М.Машерова';
+  const reqCfg = mergeRequisites('case1_act', options.requisites as Record<string, any> | undefined);
+  const organization = options.organization || reqCfg.organization || 'ВГУ имени П.М.Машерова';
   const defaultDate = options.actDate || options.writeoffDate || new Date();
-  const reason = options.reason || 'начисленная амортизация составляет 100%';
+  const reason = options.templateMode
+    ? '{{REASON}}'
+    : options.reason || 'начисленная амортизация составляет 100%';
   const techConclusion = options.technicalConclusionNumber || '';
+  const approverRoleLines = (reqCfg.approverRole || 'Руководитель организации\nРектор ВГУ\nимени П.М.Машерова')
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const approverName = reqCfg.approverName || 'В.В.Богатырёва';
 
   const sections = items.map((item, idx) => {
     const effectiveWriteoffDate =
@@ -530,14 +607,25 @@ export function buildWriteoffCase1Sections(
       item.recivedRaw || item.recivedDate,
       effectiveWriteoffDate
     );
-    const accountingName =
-      item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
-    const initialCostFormatted = formatRubKop(item.initial_cost);
-    const itemActNumber =
-      items.length > 1 && actNumber && !actNumber.includes('ПРИМЕР')
-        ? `${actNumber}/${idx + 1}`
-        : actNumber;
-    const yearSuffix = String(actYear).slice(-2);
+    const accountingName = options.templateMode
+      ? '{{ITEM_NAME}}'
+      : item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
+    const invText = options.templateMode ? '{{ITEM_INVENTORY_NUMBER}}' : item.inventory_number || 'б/н';
+    const serviceLifeText = options.templateMode ? '{{ITEM_SERVICE_LIFE}}' : serviceLife.formatted;
+    const initialCostFormatted = options.templateMode
+      ? '{{ITEM_INITIAL_COST}}'
+      : formatRubKop(item.initial_cost);
+    const accumAmortText = options.templateMode
+      ? '{{ITEM_ACCUMULATED_AMORTIZATION}}'
+      : initialCostFormatted;
+    const residualText = options.templateMode ? '{{ITEM_RESIDUAL_COST}}' : '';
+    const itemActNumber = options.templateMode
+      ? '{{ACT_NUMBER}}'
+      : items.length > 1 && actNumber && !actNumber.includes('ПРИМЕР')
+      ? `${actNumber}/${idx + 1}`
+      : actNumber;
+    const actDateText = options.templateMode ? '{{WRITEOFF_DATE}}' : formatDateRu(effectiveWriteoffDate);
+    const yearSuffix = options.templateMode ? '{{WRITEOFF_YEAR_SHORT}}' : String(actYear).slice(-2);
 
     // Top organization line
     const orgTable = new Table({
@@ -600,7 +688,7 @@ export function buildWriteoffCase1Sections(
               size: 18,
               margins: { top: 80, bottom: 80, left: 40, right: 40 },
             }),
-            makeCell(formatDateRu(effectiveWriteoffDate), {
+            makeCell(actDateText, {
               width: 2300,
               size: 18,
               margins: { top: 80, bottom: 80, left: 40, right: 40 },
@@ -619,7 +707,7 @@ export function buildWriteoffCase1Sections(
             makeCell('', { width: 200, borders: NO_BORDERS }),
             makeCell('', { width: 1400, size: 18, borders: BOTTOM_ONLY_BORDER, margins: { top: 60, bottom: 20 } }),
             makeCell('', { width: 200, borders: NO_BORDERS }),
-            makeCell('В.В.Богатырёва', {
+            makeCell(approverName, {
               width: 1900,
               size: 18,
               alignment: AlignmentType.CENTER,
@@ -671,9 +759,12 @@ export function buildWriteoffCase1Sections(
               verticalAlign: VerticalAlign.TOP,
               children: [
                 makeTextParagraph('УТВЕРЖДАЮ', { size: 18 }),
-                makeTextParagraph('Руководитель организации', { size: 18 }),
-                makeTextParagraph('Ректор ВГУ', { size: 18 }),
-                makeTextParagraph('имени П.М.Машерова', { size: 18, spacingAfter: 40 }),
+                ...approverRoleLines.map((line, lIdx) =>
+                  makeTextParagraph(line, {
+                    size: 18,
+                    spacingAfter: lIdx === approverRoleLines.length - 1 ? 40 : 0,
+                  })
+                ),
                 approvalSignTable,
                 makeTextParagraph(`" ____ " _________________ 20${yearSuffix} г.`, {
                   size: 18,
@@ -723,13 +814,13 @@ export function buildWriteoffCase1Sections(
               alignment: AlignmentType.CENTER,
               margins: { top: 80, bottom: 80, left: 60, right: 60 },
             }),
-            makeCell(item.inventory_number || 'б/н', {
+            makeCell(invText, {
               width: 1900,
               size: 18,
               alignment: AlignmentType.CENTER,
               margins: { top: 80, bottom: 80, left: 60, right: 60 },
             }),
-            makeCell(serviceLife.formatted, {
+            makeCell(serviceLifeText, {
               width: 2100,
               size: 18,
               alignment: AlignmentType.CENTER,
@@ -741,13 +832,13 @@ export function buildWriteoffCase1Sections(
               alignment: AlignmentType.CENTER,
               margins: { top: 80, bottom: 80, left: 60, right: 60 },
             }),
-            makeCell(initialCostFormatted, {
+            makeCell(accumAmortText, {
               width: 2000,
               size: 18,
               alignment: AlignmentType.CENTER,
               margins: { top: 80, bottom: 80, left: 60, right: 60 },
             }),
-            makeCell('', {
+            makeCell(residualText, {
               width: 1800,
               size: 18,
               alignment: AlignmentType.CENTER,
@@ -877,7 +968,8 @@ export function buildWriteoffCase1Sections(
         new TableRow({
           children: [
             makeCell(
-              'данное оборудование к дальнейшей эксплуатации не пригодно, списать с баланса учреждения.',
+              reqCfg.conclusionText ||
+                'данное оборудование к дальнейшей эксплуатации не пригодно, списать с баланса учреждения.',
               {
                 width: 15438,
                 size: 16,
@@ -899,7 +991,9 @@ export function buildWriteoffCase1Sections(
               margins: { top: 30, bottom: 20 },
             }),
             makeCell(
-              techConclusion
+              options.templateMode
+                ? '{{TECH_CONCLUSION_TEXT}}'
+                : techConclusion
                 ? `Техническое заключение № ${techConclusion}`
                 : 'Техническое заключение № _______________',
               {
@@ -915,12 +1009,15 @@ export function buildWriteoffCase1Sections(
       ],
     });
 
+    const chair = reqCfg.commissionChair || { title: 'Проректор', name: 'Раловец А.И' };
+    const members = Array.isArray(reqCfg.commissionMembers) ? reqCfg.commissionMembers : [];
     const commissionRows: Array<[string, string, string]> = [
-      ['Председатель комиссии по списанию имущества:', 'Проректор', 'Раловец А.И'],
-      ['Члены комиссии по списанию имущества:', 'Зам начальника ЦБУиФ', 'Долгополова Т.В'],
-      ['', 'Начальник ЦИТ', 'Мателенок Д.М.'],
-      ['', 'Ведущий инженер энергетик', 'Яцук А.Г.'],
-      ['', 'Бухгалтер', 'Сас К.А.'],
+      ['Председатель комиссии по списанию имущества:', chair.title, chair.name],
+      ...members.map((m, mIdx): [string, string, string] => [
+        mIdx === 0 ? 'Члены комиссии по списанию имущества:' : '',
+        m.title,
+        m.name,
+      ]),
     ];
 
     const commissionTableRows: TableRow[] = commissionRows.map(([label, role, person]) => {
@@ -960,6 +1057,7 @@ export function buildWriteoffCase1Sections(
       });
     });
 
+    const molEntry = reqCfg.mol || { title: 'Заведующий кафедрой ПиСП', name: 'Ермоченко С.А.' };
     commissionTableRows.push(
       new TableRow({
         children: [
@@ -981,7 +1079,7 @@ export function buildWriteoffCase1Sections(
             borders: NO_BORDERS,
             margins: { top: 20, bottom: 15 },
           }),
-          makeCell('Заведующий кафедрой ПиСП', {
+          makeCell(molEntry.title, {
             width: 4400,
             size: 17,
             alignment: AlignmentType.CENTER,
@@ -991,7 +1089,7 @@ export function buildWriteoffCase1Sections(
           makeCell('', { width: 800, borders: NO_BORDERS }),
           makeCell('', { width: 2400, size: 17, borders: BOTTOM_ONLY_BORDER, margins: { top: 20, bottom: 15 } }),
           makeCell('', { width: 800, borders: NO_BORDERS }),
-          makeCell('Ермоченко С.А.', {
+          makeCell(molEntry.name, {
             width: 2638,
             size: 17,
             alignment: AlignmentType.CENTER,
@@ -1050,7 +1148,8 @@ export function buildWriteoffCase1Sections(
         section2Table,
         conclusionTable,
         makeTextParagraph(
-          'Принято решение о передаче списанного оборудования. Сдать на переработку в полной комплектации без изъятия деталей, узлов и комплектующих изделий, содержащих драгметаллы.',
+          reqCfg.recycleDecisionText ||
+            'Принято решение о передаче списанного оборудования. Сдать на переработку в полной комплектации без изъятия деталей, узлов и комплектующих изделий, содержащих драгметаллы.',
           {
             size: 16,
             alignment: AlignmentType.CENTER,
@@ -1085,12 +1184,25 @@ export function buildTransferInvoiceCase1Sections(
   items: EquipmentForDocx[],
   options: TransferInvoiceOptions = {}
 ) {
-  const organization = options.organization || 'ВГУ имени П.М.Машерова';
-  const sender = options.sender || 'Кафедра ПиСП';
-  const recipient = options.recipient || 'ЦИТ';
-  const invoiceNumber = options.invoiceNumber || '';
-  const invoiceDate = options.invoiceDate ? formatDateRu(options.invoiceDate) : '';
-  const note = options.note || '';
+  const reqCfg = mergeRequisites('case1_invoice', options.requisites as Record<string, any> | undefined);
+  const organization = options.organization || reqCfg.organization || 'ВГУ имени П.М.Машерова';
+  const sender = options.templateMode
+    ? '{{SENDER}}'
+    : options.sender && options.sender !== 'Кафедра ПиСП'
+    ? options.sender
+    : reqCfg.sender || options.sender || 'Кафедра ПиСП';
+  const recipient = options.templateMode
+    ? '{{RECIPIENT}}'
+    : options.recipient && options.recipient !== 'ЦИТ'
+    ? options.recipient
+    : reqCfg.recipient || options.recipient || 'ЦИТ';
+  const invoiceNumber = options.templateMode ? '{{DOC_NUMBER}}' : options.invoiceNumber || '';
+  const invoiceDate = options.templateMode
+    ? '{{DOC_DATE}}'
+    : options.invoiceDate
+    ? formatDateRu(options.invoiceDate)
+    : '';
+  const note = options.templateMode ? '{{NOTE}}' : options.note || '';
 
   // Top Header with OKUD code block on the right
   const topHeaderTable = new Table({
@@ -1324,67 +1436,48 @@ export function buildTransferInvoiceCase1Sections(
   let totalQty = 0;
   let totalSum = 0;
 
-  items.forEach((item, index) => {
-    const qty = Number(item.additional_fields?.quantity) > 0 ? Number(item.additional_fields?.quantity) : 1;
-    totalQty += qty;
-
-    const kitPart = isKitPartItem(item);
-    const unitCostNum =
-      typeof item.initial_cost === 'number'
-        ? item.initial_cost
-        : parseFloat(String(item.initial_cost || 0).replace(/\s+/g, '').replace(',', '.')) || 0;
-    const rowSumNum = kitPart ? 0 : Math.round(unitCostNum * qty * 100) / 100;
-    if (!kitPart) {
-      totalSum += rowSumNum;
-    }
-
-    const col6Text = kitPart ? '' : formatRubKop(unitCostNum);
-    const col7Text = kitPart ? '' : formatRubKop(rowSumNum);
-    const accountingName =
-      item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
-    const acquiredDate = formatDateRu(item.recivedRaw || item.recivedDate);
-
+  if (options.templateMode) {
     mainRows.push(
       new TableRow({
         cantSplit: true,
         children: [
-          makeCell(String(index + 1), {
+          makeCell('{{ROW_NUM}}', {
             width: 650,
             size: 16,
             alignment: AlignmentType.CENTER,
             margins: { top: 30, bottom: 30, left: 40, right: 40 },
           }),
-          makeCell(accountingName, {
+          makeCell('{{ITEM_NAME}}', {
             width: 3856,
             size: 16,
             alignment: AlignmentType.LEFT,
             margins: { top: 30, bottom: 30, left: 60, right: 50 },
           }),
-          makeCell(acquiredDate, {
+          makeCell('{{ITEM_RECEIVED_DATE}}', {
             width: 1450,
             size: 16,
             alignment: AlignmentType.CENTER,
             margins: { top: 30, bottom: 30, left: 40, right: 40 },
           }),
-          makeCell(item.inventory_number || 'б/н', {
+          makeCell('{{ITEM_INVENTORY_NUMBER}}', {
             width: 1450,
             size: 16,
             alignment: AlignmentType.CENTER,
             margins: { top: 30, bottom: 30, left: 40, right: 40 },
           }),
-          makeCell(String(qty), {
+          makeCell('{{ITEM_QTY}}', {
             width: 900,
             size: 16,
             alignment: AlignmentType.CENTER,
             margins: { top: 30, bottom: 30, left: 40, right: 40 },
           }),
-          makeCell(col6Text, {
+          makeCell('{{ITEM_UNIT_COST}}', {
             width: 1150,
             size: 16,
             alignment: AlignmentType.CENTER,
             margins: { top: 30, bottom: 30, left: 40, right: 40 },
           }),
-          makeCell(col7Text, {
+          makeCell('{{ITEM_TOTAL_COST}}', {
             width: 1150,
             size: 16,
             alignment: AlignmentType.CENTER,
@@ -1393,7 +1486,78 @@ export function buildTransferInvoiceCase1Sections(
         ],
       })
     );
-  });
+  } else {
+    items.forEach((item, index) => {
+      const qty = Number(item.additional_fields?.quantity) > 0 ? Number(item.additional_fields?.quantity) : 1;
+      totalQty += qty;
+
+      const kitPart = isKitPartItem(item);
+      const unitCostNum =
+        typeof item.initial_cost === 'number'
+          ? item.initial_cost
+          : parseFloat(String(item.initial_cost || 0).replace(/\s+/g, '').replace(',', '.')) || 0;
+      const rowSumNum = kitPart ? 0 : Math.round(unitCostNum * qty * 100) / 100;
+      if (!kitPart) {
+        totalSum += rowSumNum;
+      }
+
+      const col6Text = kitPart ? '' : formatRubKop(unitCostNum);
+      const col7Text = kitPart ? '' : formatRubKop(rowSumNum);
+      const accountingName =
+        item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
+      const acquiredDate = formatDateRu(item.recivedRaw || item.recivedDate);
+
+      mainRows.push(
+        new TableRow({
+          cantSplit: true,
+          children: [
+            makeCell(String(index + 1), {
+              width: 650,
+              size: 16,
+              alignment: AlignmentType.CENTER,
+              margins: { top: 30, bottom: 30, left: 40, right: 40 },
+            }),
+            makeCell(accountingName, {
+              width: 3856,
+              size: 16,
+              alignment: AlignmentType.LEFT,
+              margins: { top: 30, bottom: 30, left: 60, right: 50 },
+            }),
+            makeCell(acquiredDate, {
+              width: 1450,
+              size: 16,
+              alignment: AlignmentType.CENTER,
+              margins: { top: 30, bottom: 30, left: 40, right: 40 },
+            }),
+            makeCell(item.inventory_number || 'б/н', {
+              width: 1450,
+              size: 16,
+              alignment: AlignmentType.CENTER,
+              margins: { top: 30, bottom: 30, left: 40, right: 40 },
+            }),
+            makeCell(String(qty), {
+              width: 900,
+              size: 16,
+              alignment: AlignmentType.CENTER,
+              margins: { top: 30, bottom: 30, left: 40, right: 40 },
+            }),
+            makeCell(col6Text, {
+              width: 1150,
+              size: 16,
+              alignment: AlignmentType.CENTER,
+              margins: { top: 30, bottom: 30, left: 40, right: 40 },
+            }),
+            makeCell(col7Text, {
+              width: 1150,
+              size: 16,
+              alignment: AlignmentType.CENTER,
+              margins: { top: 30, bottom: 30, left: 40, right: 40 },
+            }),
+          ],
+        })
+      );
+    });
+  }
 
   // ИТОГО по документу row
   mainRows.push(
@@ -1408,7 +1572,7 @@ export function buildTransferInvoiceCase1Sections(
           columnSpan: 4,
           margins: { top: 40, bottom: 40, left: 60, right: 40 },
         }),
-        makeCell(String(totalQty), {
+        makeCell(options.templateMode ? '{{TOTAL_QTY}}' : String(totalQty), {
           width: 900,
           bold: true,
           size: 17,
@@ -1420,7 +1584,7 @@ export function buildTransferInvoiceCase1Sections(
           size: 17,
           margins: { top: 40, bottom: 40, left: 40, right: 40 },
         }),
-        makeCell(formatRubKop(totalSum), {
+        makeCell(options.templateMode ? '{{TOTAL_SUM}}' : formatRubKop(totalSum), {
           width: 1150,
           bold: true,
           size: 17,
@@ -1475,6 +1639,10 @@ export function buildTransferInvoiceCase1Sections(
     ],
   });
 
+  const senderSign = reqCfg.senderSign || { title: 'Заведующий каф. ПиСП', name: 'Ермоченко С.А.' };
+  const recipientSign = reqCfg.recipientSign || { title: 'Нач.отд. ПТО и ЭУС ЦИТ (Д/М)', name: 'Фунтикова Т.Г.' };
+  const chiefAccountantName = reqCfg.chiefAccountantName || 'Л.Н.Прокопкина';
+
   const footerSignTable = new Table({
     width: { size: 10606, type: WidthType.DXA },
     rows: [
@@ -1494,11 +1662,11 @@ export function buildTransferInvoiceCase1Sections(
         cantSplit: true,
         children: [
           makeCell('Сдал', { width: 1000, size: 17, alignment: AlignmentType.LEFT, borders: NO_BORDERS }),
-          makeCell('Заведующий каф. ПиСП', { width: 4200, size: 17, borders: BOTTOM_ONLY_BORDER }),
+          makeCell(senderSign.title, { width: 4200, size: 17, borders: BOTTOM_ONLY_BORDER }),
           makeCell('', { width: 500, borders: NO_BORDERS }),
           makeCell('', { width: 1800, size: 17, borders: BOTTOM_ONLY_BORDER }),
           makeCell('', { width: 500, borders: NO_BORDERS }),
-          makeCell('Ермоченко С.А.', { width: 2606, size: 17, borders: BOTTOM_ONLY_BORDER }),
+          makeCell(senderSign.name, { width: 2606, size: 17, borders: BOTTOM_ONLY_BORDER }),
         ],
       }),
       new TableRow({
@@ -1515,11 +1683,11 @@ export function buildTransferInvoiceCase1Sections(
         cantSplit: true,
         children: [
           makeCell('Принял', { width: 1000, size: 17, alignment: AlignmentType.LEFT, borders: NO_BORDERS }),
-          makeCell('Нач.отд. ПТО и ЭУС ЦИТ (Д/М)', { width: 4200, size: 17, borders: BOTTOM_ONLY_BORDER }),
+          makeCell(recipientSign.title, { width: 4200, size: 17, borders: BOTTOM_ONLY_BORDER }),
           makeCell('', { width: 500, borders: NO_BORDERS }),
           makeCell('', { width: 1800, size: 17, borders: BOTTOM_ONLY_BORDER }),
           makeCell('', { width: 500, borders: NO_BORDERS }),
-          makeCell('Фунтикова Т.Г.', { width: 2606, size: 17, borders: BOTTOM_ONLY_BORDER }),
+          makeCell(recipientSign.name, { width: 2606, size: 17, borders: BOTTOM_ONLY_BORDER }),
         ],
       }),
       new TableRow({
@@ -1556,7 +1724,7 @@ export function buildTransferInvoiceCase1Sections(
             margins: { top: 40, bottom: 10 },
           }),
           makeCell('', { width: 500, borders: NO_BORDERS }),
-          makeCell('Л.Н.Прокопкина', {
+          makeCell(chiefAccountantName, {
             width: 2606,
             size: 17,
             alignment: AlignmentType.CENTER,
@@ -1833,6 +2001,8 @@ export interface LowValueInvoiceOptions {
   organization?: string;
   department?: string;
   reason?: string;
+  requisites?: TemplateRequisites;
+  templateMode?: boolean;
 }
 
 /**
@@ -1845,10 +2015,26 @@ export function buildWriteoffCase2Sections(
   items: EquipmentForDocx[],
   options: WriteoffDocxOptions = {}
 ) {
+  const reqCfg = mergeRequisites('case2_act', options.requisites as Record<string, any> | undefined);
+  const orgLines = (
+    options.organization ||
+    reqCfg.organization ||
+    'Витебский государственный университет\nимени П.М. Машерова'
+  )
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const approverRole = reqCfg.approverRole || 'Ректор        ВГУ имени П.М. Машерова';
+  const approverName = reqCfg.approverName || 'Богатырёва В.В.';
+  const orderDateText = reqCfg.orderDateText || '" 22 " сентября';
+  const orderNumber = reqCfg.orderNumber || '322';
+
   const defaultDate = options.writeoffDate || options.actDate || new Date();
   const { year: docYear } = extractCalendarYMD(defaultDate);
-  const yearStr = String(docYear);
-  const reasonText = options.reason && options.reason !== 'начисленная амортизация составляет 100%'
+  const yearStr = options.templateMode ? '{{WRITEOFF_YEAR}}' : String(docYear);
+  const reasonText = options.templateMode
+    ? '{{REASON}}'
+    : options.reason && options.reason !== 'начисленная амортизация составляет 100%'
     ? options.reason
     : `тех. закл. №${options.technicalConclusionNumber ? ` ${options.technicalConclusionNumber}` : ''}`;
 
@@ -1856,6 +2042,7 @@ export function buildWriteoffCase2Sections(
     const effectiveDate =
       options.writeoffDate || item.writeoffDate || options.actDate || defaultDate;
     const { year: itemYear } = extractCalendarYMD(effectiveDate);
+    const itemYearText = options.templateMode ? '{{WRITEOFF_YEAR}}' : String(itemYear);
     const serviceLife = calculateServiceLife(
       item.recivedRaw || item.recivedDate,
       effectiveDate
@@ -1871,9 +2058,17 @@ export function buildWriteoffCase2Sections(
         : parseFloat(String(item.initial_cost || 0).replace(/\s+/g, '').replace(',', '.')) || 0;
     const totalSum = Math.round(unitPrice * qty * 100) / 100;
 
-    const accountingName =
-      item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
-    const dateReceivedStr = formatDateRu(item.recivedRaw || item.recivedDate);
+    const accountingName = options.templateMode
+      ? '{{ITEM_NAME}}'
+      : item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
+    const invText = options.templateMode ? '{{ITEM_INVENTORY_NUMBER}}' : item.inventory_number || 'б/н';
+    const qtyText = options.templateMode ? '{{ITEM_QTY}}' : String(qty);
+    const dateReceivedStr = options.templateMode
+      ? '{{ITEM_RECEIVED_DATE}}'
+      : formatDateRu(item.recivedRaw || item.recivedDate);
+    const unitPriceText = options.templateMode ? '{{ITEM_UNIT_COST}}' : formatRubKopFixed2(unitPrice);
+    const totalSumText = options.templateMode ? '{{ITEM_TOTAL_COST}}' : formatRubKopFixed2(totalSum);
+    const serviceLifeText = options.templateMode ? '{{ITEM_SERVICE_LIFE}}' : serviceLife.formatted;
 
     // Top row: Organization left + Approval right
     const topBlock = new Table({
@@ -1886,14 +2081,12 @@ export function buildWriteoffCase2Sections(
               borders: NO_BORDERS,
               verticalAlign: VerticalAlign.TOP,
               children: [
-                makeTextParagraph('Витебский государственный университет', {
-                  size: 16,
-                  alignment: AlignmentType.CENTER,
-                }),
-                makeTextParagraph('имени П.М. Машерова', {
-                  size: 16,
-                  alignment: AlignmentType.CENTER,
-                }),
+                ...orgLines.map((line) =>
+                  makeTextParagraph(line, {
+                    size: 16,
+                    alignment: AlignmentType.CENTER,
+                  })
+                ),
                 makeTextParagraph('(предприятие, организация)', {
                   size: 12,
                   italics: true,
@@ -1907,11 +2100,11 @@ export function buildWriteoffCase2Sections(
               verticalAlign: VerticalAlign.TOP,
               children: [
                 makeTextParagraph('Утверждаю', { size: 16, alignment: AlignmentType.CENTER }),
-                makeTextParagraph('Ректор        ВГУ имени П.М. Машерова', {
+                makeTextParagraph(approverRole, {
                   size: 16,
                   alignment: AlignmentType.CENTER,
                 }),
-                makeTextParagraph('__________________________________   Богатырёва В.В.', {
+                makeTextParagraph(`__________________________________   ${approverName}`, {
                   size: 16,
                   alignment: AlignmentType.CENTER,
                   spacingBefore: 40,
@@ -1921,7 +2114,7 @@ export function buildWriteoffCase2Sections(
                   italics: true,
                   alignment: AlignmentType.CENTER,
                 }),
-                makeTextParagraph(`" ___ " __________________ ${itemYear} г.`, {
+                makeTextParagraph(`" ___ " __________________ ${itemYearText} г.`, {
                   size: 16,
                   alignment: AlignmentType.CENTER,
                   spacingBefore: 20,
@@ -2051,14 +2244,14 @@ export function buildWriteoffCase2Sections(
               margins: { top: 80, bottom: 80, left: 40, right: 40 },
             }),
             makeCell('', { width: 850, size: 14 }),
-            makeCell(item.inventory_number || 'б/н', { width: 1150, size: 14, alignment: AlignmentType.CENTER }),
+            makeCell(invText, { width: 1150, size: 14, alignment: AlignmentType.CENTER }),
             makeCell('', { width: 500, size: 14 }),
             makeCell('', { width: 650, size: 14 }),
-            makeCell(String(qty), { width: 650, size: 15, alignment: AlignmentType.CENTER }),
+            makeCell(qtyText, { width: 650, size: 15, alignment: AlignmentType.CENTER }),
             makeCell(dateReceivedStr, { width: 950, size: 14, alignment: AlignmentType.CENTER }),
-            makeCell(formatRubKopFixed2(unitPrice), { width: 800, size: 14, alignment: AlignmentType.CENTER }),
-            makeCell(formatRubKopFixed2(totalSum), { width: 800, size: 14, alignment: AlignmentType.CENTER }),
-            makeCell(serviceLife.formatted, { width: 950, size: 14, alignment: AlignmentType.CENTER }),
+            makeCell(unitPriceText, { width: 800, size: 14, alignment: AlignmentType.CENTER }),
+            makeCell(totalSumText, { width: 800, size: 14, alignment: AlignmentType.CENTER }),
+            makeCell(serviceLifeText, { width: 950, size: 14, alignment: AlignmentType.CENTER }),
             makeCell(reasonText, { width: 956, size: 13, alignment: AlignmentType.CENTER }),
             makeCell('', { width: 600, size: 14 }),
           ],
@@ -2156,7 +2349,15 @@ export function buildWriteoffCase2Sections(
       ],
     });
 
-    // Back Side Commission signatures (Case 2 exact roles & names from screenshot)
+    // Back Side Commission signatures
+    const chair2 = reqCfg.commissionChair || { title: 'Проректор', name: 'А.И. Раловец' };
+    const members2 = Array.isArray(reqCfg.commissionMembers) ? reqCfg.commissionMembers : [];
+    const mol2 = reqCfg.mol || { title: 'Материально - ответственное лицо', name: 'С.А. Ермоченко' };
+    const memberRows2: Array<[string, string]> = [
+      ...members2.map((m): [string, string] => [m.title, m.name]),
+      [mol2.title, mol2.name],
+    ];
+
     const backSignTable = new Table({
       width: { size: 10706, type: WidthType.DXA },
       rows: [
@@ -2175,7 +2376,7 @@ export function buildWriteoffCase2Sections(
         }),
         new TableRow({
           children: [
-            makeCell('Проректор', {
+            makeCell(chair2.title, {
               width: 5500,
               size: 16,
               alignment: AlignmentType.LEFT,
@@ -2183,7 +2384,7 @@ export function buildWriteoffCase2Sections(
               margins: { top: 10, bottom: 40 },
             }),
             makeCell('', { width: 2200, borders: NO_BORDERS }),
-            makeCell('А.И. Раловец', {
+            makeCell(chair2.name, {
               width: 3006,
               size: 16,
               alignment: AlignmentType.RIGHT,
@@ -2205,15 +2406,7 @@ export function buildWriteoffCase2Sections(
             makeCell('', { width: 3006, borders: NO_BORDERS }),
           ],
         }),
-        ...(
-          [
-            ['Зам. нач. ЦБУ и Ф', 'Д.А. Лукин'],
-            ['Начальник ЦИТ', 'Д.М. Мателенок'],
-            ['Бухгалтер ЦБУ и Ф', 'Т.Л. Русецкая'],
-            ['Ведущий инженер-энергетик', 'А.Г. Яцук'],
-            ['Материально - ответственное лицо', 'С.А. Ермоченко'],
-          ] as Array<[string, string]>
-        ).map(
+        ...memberRows2.map(
           ([role, name]) =>
             new TableRow({
               children: [
@@ -2266,7 +2459,7 @@ export function buildWriteoffCase2Sections(
           spacingAfter: 80,
         }),
         makeTextParagraph(
-          `     Комиссия, назначенная приказом от " 22 " сентября ${yearStr} года № 322, осмотрела принятые за ___________ и находившиеся в эксплуатации отдельные предметы в составе оборотных средств и признала их пришедшими в негодность и подлежащими сдаче в утиль.`,
+          `     Комиссия, назначенная приказом от ${orderDateText} ${yearStr} года № ${orderNumber}, осмотрела принятые за ___________ и находившиеся в эксплуатации отдельные предметы в составе оборотных средств и признала их пришедшими в негодность и подлежащими сдаче в утиль.`,
           {
             size: 15,
             alignment: AlignmentType.LEFT,
@@ -2282,7 +2475,7 @@ export function buildWriteoffCase2Sections(
           spacingAfter: 60,
         }),
         makeTextParagraph(
-          `Техническое заключение № ${options.technicalConclusionNumber || ''}`,
+          `Техническое заключение № ${options.templateMode ? '{{TECH_CONCLUSION}}' : options.technicalConclusionNumber || ''}`,
           {
             size: 15,
             spacingAfter: 60,
@@ -2323,7 +2516,7 @@ export function buildWriteoffCase2Sections(
         }),
         backSignTable,
         makeTextParagraph(
-          `Утиль по накладной № ______________ сдан        " ___ " ______________ ${itemYear} г.`,
+          `Утиль по накладной № ______________ сдан        " ___ " ______________ ${itemYearText} г.`,
           {
             size: 15,
             alignment: AlignmentType.CENTER,
@@ -2355,12 +2548,20 @@ export function buildLowValueInvoiceCase2Sections(
   items: EquipmentForDocx[],
   options: LowValueInvoiceOptions = {}
 ) {
-  const organization = options.organization || 'ВГУ имени П.М. Машерова';
-  const department = options.department || 'Кафедра ПиСП';
+  const reqCfg = mergeRequisites('case2_invoice', options.requisites as Record<string, any> | undefined);
+  const organization = options.organization || reqCfg.organization || 'ВГУ имени П.М. Машерова';
+  const department = options.templateMode
+    ? '{{DEPARTMENT}}'
+    : options.department && options.department !== 'Кафедра ПиСП'
+    ? options.department
+    : reqCfg.department || options.department || 'Кафедра ПиСП';
   const invoiceDateInput = options.invoiceDate || new Date();
   const { year: docYear } = extractCalendarYMD(invoiceDateInput);
-  const yearStr = String(docYear);
-  const invoiceNumber = options.invoiceNumber || '_______';
+  const yearStr = options.templateMode ? '{{DOC_YEAR}}' : String(docYear);
+  const invoiceNumber = options.templateMode ? '{{DOC_NUMBER}}' : options.invoiceNumber || '_______';
+  const molEntry = reqCfg.mol || { title: 'Зав. каф. ПиСП', name: 'Ермоченко С.А.' };
+  const senderSign = reqCfg.senderSign || { title: 'Зав. каф. ПиСП', name: 'Ермоченко С.А.' };
+  const recipientSign = reqCfg.recipientSign || { title: 'Нач. отд. ПТО и ЭУС ЦИТ (Д/М)', name: 'Фунтикова Т.Г.' };
 
   // Top-right УТВЕРЖДАЮ block
   const approvalHeaderTable = new Table({
@@ -2464,7 +2665,7 @@ export function buildLowValueInvoiceCase2Sections(
                 { size: 16 }
               ),
               makeTextParagraph(
-                'лицо (МОЛ)    Зав. каф. ПиСП Ермоченко С.А.  _______________________',
+                `лицо (МОЛ)    ${[molEntry.title, molEntry.name].filter(Boolean).join(' ')}  _______________________`,
                 { size: 16 }
               ),
               makeTextParagraph(
@@ -2529,61 +2730,49 @@ export function buildLowValueInvoiceCase2Sections(
     }),
   ];
 
-  items.forEach((item) => {
-    const qty =
-      Number(item.additional_fields?.quantity) > 0
-        ? Number(item.additional_fields?.quantity)
-        : 1;
-    const unitPrice =
-      typeof item.initial_cost === 'number'
-        ? item.initial_cost
-        : parseFloat(String(item.initial_cost || 0).replace(/\s+/g, '').replace(',', '.')) || 0;
-    const rowSum = Math.round(unitPrice * qty * 100) / 100;
-    const accountingName =
-      item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
-
+  if (options.templateMode) {
     mainRows.push(
       new TableRow({
         cantSplit: true,
         children: [
-          makeCell(accountingName, {
+          makeCell('{{ITEM_NAME}}', {
             width: 3456,
             size: 15,
             alignment: AlignmentType.LEFT,
             margins: { top: 30, bottom: 30, left: 60, right: 40 },
           }),
-          makeCell('шт.', {
+          makeCell('{{ITEM_UNIT}}', {
             width: 850,
             size: 15,
             alignment: AlignmentType.LEFT,
             margins: { top: 30, bottom: 30, left: 40, right: 40 },
           }),
-          makeCell(item.inventory_number || 'б/н', {
+          makeCell('{{ITEM_INVENTORY_NUMBER}}', {
             width: 1450,
             size: 15,
             alignment: AlignmentType.LEFT,
             margins: { top: 30, bottom: 30, left: 50, right: 40 },
           }),
           makeCell('', { width: 950, size: 15 }),
-          makeCell(String(qty), {
+          makeCell('{{ITEM_QTY}}', {
             width: 950,
             size: 15,
             alignment: AlignmentType.LEFT,
             margins: { top: 30, bottom: 30, left: 50, right: 40 },
           }),
-          makeCell(String(qty), {
+          makeCell('{{ITEM_QTY}}', {
             width: 950,
             size: 15,
             alignment: AlignmentType.LEFT,
             margins: { top: 30, bottom: 30, left: 50, right: 40 },
           }),
-          makeCell(formatRubKopFixed2(unitPrice), {
+          makeCell('{{ITEM_UNIT_COST}}', {
             width: 1050,
             size: 15,
             alignment: AlignmentType.LEFT,
             margins: { top: 30, bottom: 30, left: 50, right: 40 },
           }),
-          makeCell(formatRubKopFixed2(rowSum), {
+          makeCell('{{ITEM_TOTAL_COST}}', {
             width: 1050,
             size: 15,
             alignment: AlignmentType.LEFT,
@@ -2592,26 +2781,91 @@ export function buildLowValueInvoiceCase2Sections(
         ],
       })
     );
-  });
+  } else {
+    items.forEach((item) => {
+      const qty =
+        Number(item.additional_fields?.quantity) > 0
+          ? Number(item.additional_fields?.quantity)
+          : 1;
+      const unitPrice =
+        typeof item.initial_cost === 'number'
+          ? item.initial_cost
+          : parseFloat(String(item.initial_cost || 0).replace(/\s+/g, '').replace(',', '.')) || 0;
+      const rowSum = Math.round(unitPrice * qty * 100) / 100;
+      const accountingName =
+        item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
 
-  // Pad with blank rows up to at least 16 rows so it visually resembles Form 434
-  const minRows = Math.max(16, items.length + 4);
-  for (let r = items.length; r < minRows; r++) {
-    mainRows.push(
-      new TableRow({
-        cantSplit: true,
-        children: [
-          makeCell('', { width: 3456, size: 15, margins: { top: 60, bottom: 60 } }),
-          makeCell('', { width: 850, size: 15, margins: { top: 60, bottom: 60 } }),
-          makeCell('', { width: 1450, size: 15, margins: { top: 60, bottom: 60 } }),
-          makeCell('', { width: 950, size: 15, margins: { top: 60, bottom: 60 } }),
-          makeCell('', { width: 950, size: 15, margins: { top: 60, bottom: 60 } }),
-          makeCell('', { width: 950, size: 15, margins: { top: 60, bottom: 60 } }),
-          makeCell('', { width: 1050, size: 15, margins: { top: 60, bottom: 60 } }),
-          makeCell('', { width: 1050, size: 15, margins: { top: 60, bottom: 60 } }),
-        ],
-      })
-    );
+      mainRows.push(
+        new TableRow({
+          cantSplit: true,
+          children: [
+            makeCell(accountingName, {
+              width: 3456,
+              size: 15,
+              alignment: AlignmentType.LEFT,
+              margins: { top: 30, bottom: 30, left: 60, right: 40 },
+            }),
+            makeCell('шт.', {
+              width: 850,
+              size: 15,
+              alignment: AlignmentType.LEFT,
+              margins: { top: 30, bottom: 30, left: 40, right: 40 },
+            }),
+            makeCell(item.inventory_number || 'б/н', {
+              width: 1450,
+              size: 15,
+              alignment: AlignmentType.LEFT,
+              margins: { top: 30, bottom: 30, left: 50, right: 40 },
+            }),
+            makeCell('', { width: 950, size: 15 }),
+            makeCell(String(qty), {
+              width: 950,
+              size: 15,
+              alignment: AlignmentType.LEFT,
+              margins: { top: 30, bottom: 30, left: 50, right: 40 },
+            }),
+            makeCell(String(qty), {
+              width: 950,
+              size: 15,
+              alignment: AlignmentType.LEFT,
+              margins: { top: 30, bottom: 30, left: 50, right: 40 },
+            }),
+            makeCell(formatRubKopFixed2(unitPrice), {
+              width: 1050,
+              size: 15,
+              alignment: AlignmentType.LEFT,
+              margins: { top: 30, bottom: 30, left: 50, right: 40 },
+            }),
+            makeCell(formatRubKopFixed2(rowSum), {
+              width: 1050,
+              size: 15,
+              alignment: AlignmentType.LEFT,
+              margins: { top: 30, bottom: 30, left: 50, right: 40 },
+            }),
+          ],
+        })
+      );
+    });
+
+    // Pad with blank rows up to at least 16 rows so it visually resembles Form 434
+    const minRows = Math.max(16, items.length + 4);
+    for (let r = items.length; r < minRows; r++) {
+      mainRows.push(
+        new TableRow({
+          cantSplit: true,
+          children: [
+            makeCell('', { width: 3456, size: 15, margins: { top: 60, bottom: 60 } }),
+            makeCell('', { width: 850, size: 15, margins: { top: 60, bottom: 60 } }),
+            makeCell('', { width: 1450, size: 15, margins: { top: 60, bottom: 60 } }),
+            makeCell('', { width: 950, size: 15, margins: { top: 60, bottom: 60 } }),
+            makeCell('', { width: 950, size: 15, margins: { top: 60, bottom: 60 } }),
+            makeCell('', { width: 950, size: 15, margins: { top: 60, bottom: 60 } }),
+            makeCell('', { width: 1050, size: 15, margins: { top: 60, bottom: 60 } }),
+            makeCell('', { width: 1050, size: 15, margins: { top: 60, bottom: 60 } }),
+          ],
+        })
+      );
+    }
   }
 
   const mainTable = new Table({
@@ -2632,7 +2886,7 @@ export function buildLowValueInvoiceCase2Sections(
             alignment: AlignmentType.LEFT,
             borders: NO_BORDERS,
           }),
-          makeCell('Зав. каф. ПиСП', {
+          makeCell(senderSign.title, {
             width: 3400,
             size: 17,
             alignment: AlignmentType.CENTER,
@@ -2641,7 +2895,7 @@ export function buildLowValueInvoiceCase2Sections(
           makeCell('', { width: 300, borders: NO_BORDERS }),
           makeCell('', { width: 2700, size: 17, borders: BOTTOM_ONLY_BORDER }),
           makeCell('', { width: 300, borders: NO_BORDERS }),
-          makeCell('Ермоченко С.А.', {
+          makeCell(senderSign.name, {
             width: 2806,
             size: 17,
             alignment: AlignmentType.CENTER,
@@ -2680,7 +2934,7 @@ export function buildLowValueInvoiceCase2Sections(
             alignment: AlignmentType.LEFT,
             borders: NO_BORDERS,
           }),
-          makeCell('Нач. отд. ПТО и ЭУС ЦИТ (Д/М)', {
+          makeCell(recipientSign.title, {
             width: 3400,
             size: 15,
             alignment: AlignmentType.CENTER,
@@ -2689,7 +2943,7 @@ export function buildLowValueInvoiceCase2Sections(
           makeCell('', { width: 300, borders: NO_BORDERS }),
           makeCell('', { width: 2700, size: 17, borders: BOTTOM_ONLY_BORDER }),
           makeCell('', { width: 300, borders: NO_BORDERS }),
-          makeCell('Фунтикова Т.Г.', {
+          makeCell(recipientSign.name, {
             width: 2806,
             size: 17,
             alignment: AlignmentType.CENTER,
@@ -2756,10 +3010,21 @@ export function buildWriteoffCase3Sections(
   actNumber: string = '',
   options: WriteoffDocxOptions = {}
 ) {
+  const reqCfg = mergeRequisites('case3_act', options.requisites as Record<string, any> | undefined);
+  const organization = options.organization || reqCfg.organization || 'ВГУ имени П.М. Машерова';
+  const approverRole = reqCfg.approverRole || 'Ректор ВГУ имени П.М. Машерова';
+  const approverName = reqCfg.approverName || 'В.В. Богатырёва';
+  const orderDateText = reqCfg.orderDateText || '22   сентября';
+  const orderNumber = reqCfg.orderNumber || '322';
+
   const defaultDate = options.writeoffDate || options.actDate || new Date();
   const { year: docYear } = extractCalendarYMD(defaultDate);
-  const yearStr = String(docYear);
-  const actNumText = actNumber && String(actNumber).trim() ? String(actNumber).trim() : '';
+  const yearStr = options.templateMode ? '{{WRITEOFF_YEAR}}' : String(docYear);
+  const actNumText = options.templateMode
+    ? '{{ACT_NUMBER}}'
+    : actNumber && String(actNumber).trim()
+    ? String(actNumber).trim()
+    : '';
 
   // Top Header: Organization left + Approval right
   const topBlock = new Table({
@@ -2777,7 +3042,7 @@ export function buildWriteoffCase3Sections(
                 rows: [
                   new TableRow({
                     children: [
-                      makeCell('ВГУ имени П.М. Машерова', {
+                      makeCell(organization, {
                         width: 4600,
                         size: 16,
                         alignment: AlignmentType.CENTER,
@@ -2817,7 +3082,7 @@ export function buildWriteoffCase3Sections(
                 rows: [
                   new TableRow({
                     children: [
-                      makeCell('Ректор ВГУ имени П.М. Машерова', {
+                      makeCell(approverRole, {
                         width: 5700,
                         size: 16,
                         alignment: AlignmentType.CENTER,
@@ -2848,7 +3113,7 @@ export function buildWriteoffCase3Sections(
                         borders: BOTTOM_ONLY_BORDER,
                         margins: { top: 40, bottom: 10 },
                       }),
-                      makeCell('В.В. Богатырёва', {
+                      makeCell(approverName, {
                         width: 3300,
                         size: 16,
                         alignment: AlignmentType.CENTER,
@@ -2915,7 +3180,7 @@ export function buildWriteoffCase3Sections(
     ],
   });
 
-  // Top small metadata table (6 columns totaling 10706, matching Case 3 screenshot)
+  // Top small metadata table
   const metaTable = new Table({
     width: { size: 10706, type: WidthType.DXA },
     rows: [
@@ -2950,8 +3215,6 @@ export function buildWriteoffCase3Sections(
     ],
   });
 
-  // 10-column item table header helper (total width 10706)
-  // Widths: [2050, 1450, 500, 700, 1150, 700, 850, 900, 600, 1806] = 10706
   const buildTenColHeaderRows = (): TableRow[] => [
     new TableRow({
       cantSplit: true,
@@ -2992,6 +3255,52 @@ export function buildWriteoffCase3Sections(
       ],
     }),
   ];
+
+  const makeTenColTemplateRow = () =>
+    new TableRow({
+      cantSplit: true,
+      children: [
+        makeCell('{{ITEM_NAME}}', {
+          width: 2050,
+          size: 14,
+          alignment: AlignmentType.LEFT,
+          margins: { top: 40, bottom: 40, left: 50, right: 40 },
+        }),
+        makeCell('{{ITEM_INVENTORY_NUMBER}}', {
+          width: 1450,
+          size: 14,
+          alignment: AlignmentType.CENTER,
+        }),
+        makeCell('', { width: 500, size: 14 }),
+        makeCell('{{ITEM_UNIT}}', {
+          width: 700,
+          size: 14,
+          alignment: AlignmentType.CENTER,
+        }),
+        makeCell('{{ITEM_RECEIVED_DATE}}', {
+          width: 1150,
+          size: 14,
+          alignment: AlignmentType.CENTER,
+        }),
+        makeCell('{{ITEM_QTY}}', {
+          width: 700,
+          size: 14,
+          alignment: AlignmentType.CENTER,
+        }),
+        makeCell('{{ITEM_UNIT_COST}}', {
+          width: 850,
+          size: 14,
+          alignment: AlignmentType.CENTER,
+        }),
+        makeCell('{{ITEM_TOTAL_COST}}', {
+          width: 900,
+          size: 14,
+          alignment: AlignmentType.CENTER,
+        }),
+        makeCell('', { width: 600, size: 14 }),
+        makeCell('', { width: 1806, size: 14 }),
+      ],
+    });
 
   const makeTenColItemRow = (item: EquipmentForDocx) => {
     const qty =
@@ -3071,16 +3380,32 @@ export function buildWriteoffCase3Sections(
       ],
     });
 
-  // Split items between Front (up to 15) and Back continuation (overflow + blank rows)
-  const frontItems = items.slice(0, 15);
-  const backOverflowItems = items.slice(15);
+  let frontTableRows: TableRow[];
+  let backTableRows: TableRow[];
 
-  const frontTableRows: TableRow[] = [
-    ...buildTenColHeaderRows(),
-    ...frontItems.map(makeTenColItemRow),
-  ];
-  for (let i = frontItems.length; i < 15; i++) {
-    frontTableRows.push(makeEmptyTenColRow());
+  if (options.templateMode) {
+    frontTableRows = [...buildTenColHeaderRows(), makeTenColTemplateRow()];
+    backTableRows = [...buildTenColHeaderRows(), makeTenColTemplateRow()];
+  } else {
+    const frontItems = items.slice(0, 15);
+    const backOverflowItems = items.slice(15);
+
+    frontTableRows = [
+      ...buildTenColHeaderRows(),
+      ...frontItems.map(makeTenColItemRow),
+    ];
+    for (let i = frontItems.length; i < 15; i++) {
+      frontTableRows.push(makeEmptyTenColRow());
+    }
+
+    backTableRows = [
+      ...buildTenColHeaderRows(),
+      ...backOverflowItems.map(makeTenColItemRow),
+    ];
+    const backMinRows = Math.max(12, backOverflowItems.length + 3);
+    for (let i = backOverflowItems.length; i < backMinRows; i++) {
+      backTableRows.push(makeEmptyTenColRow());
+    }
   }
 
   const frontItemsTable = new Table({
@@ -3088,21 +3413,12 @@ export function buildWriteoffCase3Sections(
     rows: frontTableRows,
   });
 
-  const backTableRows: TableRow[] = [
-    ...buildTenColHeaderRows(),
-    ...backOverflowItems.map(makeTenColItemRow),
-  ];
-  const backMinRows = Math.max(12, backOverflowItems.length + 3);
-  for (let i = backOverflowItems.length; i < backMinRows; i++) {
-    backTableRows.push(makeEmptyTenColRow());
-  }
-
   const backContinuationTable = new Table({
     width: { size: 10706, type: WidthType.DXA },
     rows: backTableRows,
   });
 
-  // Back side Утиль 8-col table (Col 3: наименование, Col 4: код — matching Case 3 back screenshot)
+  // Back side Утиль 8-col table
   const scrapTable = new Table({
     width: { size: 10706, type: WidthType.DXA },
     rows: [
@@ -3162,13 +3478,17 @@ export function buildWriteoffCase3Sections(
     ],
   });
 
-  // Back side Commission Signatures (5 people in Case 3 screenshot order)
+  const chair3 = reqCfg.commissionChair || { title: 'Проректор', name: 'А.И. Раловец' };
+  const members3 = Array.isArray(reqCfg.commissionMembers) ? reqCfg.commissionMembers : [];
+  const mol3 = reqCfg.mol || { title: 'МОЛ', name: 'С.А. Ермоченко' };
   const commissionEntries: Array<[string, string, string]> = [
-    ['Председатель комиссии', 'Проректор', 'А.И. Раловец'],
-    ['Члены комиссии:', 'Зам.нач. ЦБУ и Ф', 'Д.А. Лукин'],
-    ['', 'Ведущий инж.энергетик', 'А.Г. Яцук'],
-    ['', 'Бухгалтер ЦБУ и Ф', 'Т.Л. Русецкая'],
-    ['', 'МОЛ', 'С.А. Ермоченко'],
+    ['Председатель комиссии', chair3.title, chair3.name],
+    ...members3.map((m, mIdx): [string, string, string] => [
+      mIdx === 0 ? 'Члены комиссии:' : '',
+      m.title,
+      m.name,
+    ]),
+    ['', mol3.title, mol3.name],
   ];
 
   const signRows: TableRow[] = [];
@@ -3275,7 +3595,7 @@ export function buildWriteoffCase3Sections(
           spacingAfter: 80,
         }),
         makeTextParagraph(
-          `Комиссия, назначенная приказом от   22   сентября ${yearStr} г.   №322   осмотрела принятые за _________________ г., находившиеся в эксплуатации малоценные и быстроизнашивающиеся предметы и признала их пришедшими в негодность и подлежащими сдаче в утиль`,
+          `Комиссия, назначенная приказом от   ${orderDateText} ${yearStr} г.   №${orderNumber}   осмотрела принятые за _________________ г., находившиеся в эксплуатации малоценные и быстроизнашиющиеся предметы и признала их пришедшими в негодность и подлежащими сдаче в утиль`,
           {
             size: 15,
             alignment: AlignmentType.LEFT,
@@ -3345,6 +3665,467 @@ export async function generateLowValueNoDmWriteoffActDocx(
   const sections = buildWriteoffCase3Sections(items, actNumber, options);
   const doc = new Document({ sections });
   return await Packer.toBuffer(doc);
+}
+
+/**
+ * Generates an editable .docx template containing static text from current requisites
+ * and {{PLACEHOLDER}} markers in all DB-driven fields/rows so the user can edit
+ * order numbers, names, and titles in Microsoft Word / LibreOffice and re-upload it.
+ */
+export async function generateEditableTemplateDocx(
+  key: WriteoffTemplateKey,
+  requisites?: TemplateRequisites
+): Promise<Buffer> {
+  const placeholderItem: EquipmentForDocx = {
+    id: 0,
+    inventory_number: '{{ITEM_INVENTORY_NUMBER}}',
+    name: '{{ITEM_NAME}}',
+    typeName: '',
+    roomNumber: '',
+    initial_cost: null,
+    residual_cost: null,
+    recivedDate: '',
+    recivedRaw: null,
+    additional_fields: {},
+  };
+
+  let sections: any[];
+  switch (key) {
+    case 'case1_act':
+      sections = buildWriteoffCase1Sections([placeholderItem], '{{ACT_NUMBER}}', {
+        requisites,
+        templateMode: true,
+      });
+      break;
+    case 'case1_invoice':
+      sections = buildTransferInvoiceCase1Sections([placeholderItem], {
+        requisites,
+        templateMode: true,
+      });
+      break;
+    case 'case2_act':
+      sections = buildWriteoffCase2Sections([placeholderItem], {
+        requisites,
+        templateMode: true,
+      });
+      break;
+    case 'case2_invoice':
+      sections = buildLowValueInvoiceCase2Sections([placeholderItem], {
+        requisites,
+        templateMode: true,
+      });
+      break;
+    case 'case3_act':
+      sections = buildWriteoffCase3Sections([placeholderItem], '{{ACT_NUMBER}}', {
+        requisites,
+        templateMode: true,
+      });
+      break;
+  }
+
+  const doc = new Document({ sections });
+  return await Packer.toBuffer(doc);
+}
+
+function buildCase1ActItemPlaceholders(
+  items: EquipmentForDocx[],
+  actNumber: string,
+  options: WriteoffDocxOptions,
+  requisites: TemplateRequisites
+): Array<Record<string, string>> {
+  const defaultDate = options.actDate || options.writeoffDate || new Date();
+  const reason = options.reason || 'начисленная амортизация составляет 100%';
+  const techConclusion = options.technicalConclusionNumber || '';
+  const techText = techConclusion
+    ? `Техническое заключение № ${techConclusion}`
+    : 'Техническое заключение № _______________';
+
+  return items.map((item, idx) => {
+    const effectiveWriteoffDate =
+      options.writeoffDate || item.writeoffDate || options.actDate || defaultDate;
+    const { year: actYear } = extractCalendarYMD(effectiveWriteoffDate);
+    const serviceLife = calculateServiceLife(
+      item.recivedRaw || item.recivedDate,
+      effectiveWriteoffDate
+    );
+    const accountingName =
+      item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
+    const initialCostFormatted = formatRubKop(item.initial_cost);
+    const itemActNumber =
+      items.length > 1 && actNumber && !actNumber.includes('ПРИМЕР')
+        ? `${actNumber}/${idx + 1}`
+        : actNumber;
+    const residualCost =
+      item.residual_cost !== null && item.residual_cost !== undefined
+        ? formatRubKop(item.residual_cost)
+        : '';
+
+    return {
+      ACT_NUMBER: itemActNumber || '',
+      WRITEOFF_DATE: formatDateRu(effectiveWriteoffDate),
+      WRITEOFF_YEAR: String(actYear),
+      WRITEOFF_YEAR_SHORT: String(actYear).slice(-2),
+      ITEM_NAME: accountingName,
+      ITEM_INVENTORY_NUMBER: item.inventory_number || 'б/н',
+      ITEM_SERVICE_LIFE: serviceLife.formatted,
+      ITEM_INITIAL_COST: initialCostFormatted,
+      ITEM_ACCUMULATED_AMORTIZATION: initialCostFormatted,
+      ITEM_RESIDUAL_COST: residualCost,
+      REASON: reason,
+      TECH_CONCLUSION: techConclusion,
+      TECH_CONCLUSION_TEXT: techText,
+      ORGANIZATION: options.organization || requisites.organization || 'ВГУ имени П.М.Машерова',
+    };
+  });
+}
+
+function buildCase2ActItemPlaceholders(
+  items: EquipmentForDocx[],
+  options: WriteoffDocxOptions,
+  requisites: TemplateRequisites
+): Array<Record<string, string>> {
+  const defaultDate = options.writeoffDate || options.actDate || new Date();
+  const reasonText =
+    options.reason && options.reason !== 'начисленная амортизация составляет 100%'
+      ? options.reason
+      : `тех. закл. №${options.technicalConclusionNumber ? ` ${options.technicalConclusionNumber}` : ''}`;
+
+  return items.map((item) => {
+    const effectiveDate =
+      options.writeoffDate || item.writeoffDate || options.actDate || defaultDate;
+    const { year: itemYear } = extractCalendarYMD(effectiveDate);
+    const serviceLife = calculateServiceLife(
+      item.recivedRaw || item.recivedDate,
+      effectiveDate
+    );
+    const qty =
+      Number(item.additional_fields?.quantity) > 0
+        ? Number(item.additional_fields?.quantity)
+        : 1;
+    const unitPrice =
+      typeof item.initial_cost === 'number'
+        ? item.initial_cost
+        : parseFloat(String(item.initial_cost || 0).replace(/\s+/g, '').replace(',', '.')) || 0;
+    const totalSum = Math.round(unitPrice * qty * 100) / 100;
+    const accountingName =
+      item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
+
+    return {
+      WRITEOFF_YEAR: String(itemYear),
+      WRITEOFF_DATE: formatDateRu(effectiveDate),
+      ITEM_NAME: accountingName,
+      ITEM_INVENTORY_NUMBER: item.inventory_number || 'б/н',
+      ITEM_QTY: String(qty),
+      ITEM_RECEIVED_DATE: formatDateRu(item.recivedRaw || item.recivedDate),
+      ITEM_UNIT_COST: formatRubKopFixed2(unitPrice),
+      ITEM_TOTAL_COST: formatRubKopFixed2(totalSum),
+      ITEM_SERVICE_LIFE: serviceLife.formatted,
+      REASON: reasonText,
+      TECH_CONCLUSION: options.technicalConclusionNumber || '',
+      ORDER_NUMBER: requisites.orderNumber || '322',
+      ORDER_DATE_TEXT: requisites.orderDateText || '" 22 " сентября',
+      ORGANIZATION: options.organization || requisites.organization || '',
+    };
+  });
+}
+
+function buildCase3ActPlaceholders(
+  items: EquipmentForDocx[],
+  actNumber: string,
+  options: WriteoffDocxOptions,
+  requisites: TemplateRequisites
+): { docValues: Record<string, string>; itemValues: Array<Record<string, string>> } {
+  const defaultDate = options.writeoffDate || options.actDate || new Date();
+  const { year: docYear } = extractCalendarYMD(defaultDate);
+  const actNumText = actNumber && String(actNumber).trim() ? String(actNumber).trim() : '';
+
+  const itemValues = items.map((item, idx) => {
+    const qty =
+      Number(item.additional_fields?.quantity) > 0
+        ? Number(item.additional_fields?.quantity)
+        : 1;
+    const unitPrice =
+      typeof item.initial_cost === 'number'
+        ? item.initial_cost
+        : parseFloat(String(item.initial_cost || 0).replace(/\s+/g, '').replace(',', '.')) || 0;
+    const totalSum = Math.round(unitPrice * qty * 100) / 100;
+    const accountingName =
+      item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
+
+    return {
+      ROW_NUM: String(idx + 1),
+      ITEM_NAME: accountingName,
+      ITEM_INVENTORY_NUMBER: item.inventory_number || 'б/н',
+      ITEM_UNIT: 'шт.',
+      ITEM_RECEIVED_DATE: formatDateRu(item.recivedRaw || item.recivedDate),
+      ITEM_QTY: String(qty),
+      ITEM_UNIT_COST: formatRubKopFixed2(unitPrice),
+      ITEM_TOTAL_COST: formatRubKopFixed2(totalSum),
+    };
+  });
+
+  const docValues = {
+    ACT_NUMBER: actNumText,
+    WRITEOFF_YEAR: String(docYear),
+    WRITEOFF_DATE: formatDateRu(defaultDate),
+    ORDER_NUMBER: requisites.orderNumber || '322',
+    ORDER_DATE_TEXT: requisites.orderDateText || '22   сентября',
+    ORGANIZATION: options.organization || requisites.organization || 'ВГУ имени П.М. Машерова',
+  };
+
+  return { docValues, itemValues };
+}
+
+function buildCase1InvoicePlaceholders(
+  items: EquipmentForDocx[],
+  options: TransferInvoiceOptions,
+  requisites: TemplateRequisites
+): { docValues: Record<string, string>; itemValues: Array<Record<string, string>> } {
+  let totalQty = 0;
+  let totalSum = 0;
+
+  const itemValues = items.map((item, index) => {
+    const qty =
+      Number(item.additional_fields?.quantity) > 0
+        ? Number(item.additional_fields?.quantity)
+        : 1;
+    totalQty += qty;
+
+    const kitPart = isKitPartItem(item);
+    const unitCostNum =
+      typeof item.initial_cost === 'number'
+        ? item.initial_cost
+        : parseFloat(String(item.initial_cost || 0).replace(/\s+/g, '').replace(',', '.')) || 0;
+    const rowSumNum = kitPart ? 0 : Math.round(unitCostNum * qty * 100) / 100;
+    if (!kitPart) totalSum += rowSumNum;
+
+    const accountingName =
+      item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
+
+    return {
+      ROW_NUM: String(index + 1),
+      ITEM_NAME: accountingName,
+      ITEM_RECEIVED_DATE: formatDateRu(item.recivedRaw || item.recivedDate),
+      ITEM_INVENTORY_NUMBER: item.inventory_number || 'б/н',
+      ITEM_QTY: String(qty),
+      ITEM_UNIT_COST: kitPart ? '' : formatRubKop(unitCostNum),
+      ITEM_TOTAL_COST: kitPart ? '' : formatRubKop(rowSumNum),
+    };
+  });
+
+  const sender =
+    options.sender && options.sender !== 'Кафедра ПиСП'
+      ? options.sender
+      : requisites.sender || options.sender || 'Кафедра ПиСП';
+  const recipient =
+    options.recipient && options.recipient !== 'ЦИТ'
+      ? options.recipient
+      : requisites.recipient || options.recipient || 'ЦИТ';
+
+  const docValues = {
+    DOC_NUMBER: options.invoiceNumber || '',
+    DOC_DATE: options.invoiceDate ? formatDateRu(options.invoiceDate) : '',
+    SENDER: sender,
+    RECIPIENT: recipient,
+    NOTE: options.note || '',
+    TOTAL_QTY: String(totalQty),
+    TOTAL_SUM: formatRubKop(totalSum),
+    ORGANIZATION: options.organization || requisites.organization || 'ВГУ имени П.М.Машерова',
+  };
+
+  return { docValues, itemValues };
+}
+
+function buildCase2InvoicePlaceholders(
+  items: EquipmentForDocx[],
+  options: LowValueInvoiceOptions,
+  requisites: TemplateRequisites
+): { docValues: Record<string, string>; itemValues: Array<Record<string, string>> } {
+  const invoiceDateInput = options.invoiceDate || new Date();
+  const { year: docYear } = extractCalendarYMD(invoiceDateInput);
+
+  const itemValues = items.map((item, idx) => {
+    const qty =
+      Number(item.additional_fields?.quantity) > 0
+        ? Number(item.additional_fields?.quantity)
+        : 1;
+    const unitPrice =
+      typeof item.initial_cost === 'number'
+        ? item.initial_cost
+        : parseFloat(String(item.initial_cost || 0).replace(/\s+/g, '').replace(',', '.')) || 0;
+    const rowSum = Math.round(unitPrice * qty * 100) / 100;
+    const accountingName =
+      item.additional_fields?.['Наименование (по бухгалтерии)'] || item.name;
+
+    return {
+      ROW_NUM: String(idx + 1),
+      ITEM_NAME: accountingName,
+      ITEM_UNIT: 'шт.',
+      ITEM_INVENTORY_NUMBER: item.inventory_number || 'б/н',
+      ITEM_QTY: String(qty),
+      ITEM_UNIT_COST: formatRubKopFixed2(unitPrice),
+      ITEM_TOTAL_COST: formatRubKopFixed2(rowSum),
+    };
+  });
+
+  const department =
+    options.department && options.department !== 'Кафедра ПиСП'
+      ? options.department
+      : requisites.department || options.department || 'Кафедра ПиСП';
+
+  const docValues = {
+    DOC_NUMBER: options.invoiceNumber || '_______',
+    DOC_DATE: formatDateRu(invoiceDateInput),
+    DOC_YEAR: String(docYear),
+    DEPARTMENT: department,
+    ORGANIZATION: options.organization || requisites.organization || 'ВГУ имени П.М. Машерова',
+  };
+
+  return { docValues, itemValues };
+}
+
+/**
+ * Renders Writeoff Acts honoring both saved DB requisites and custom uploaded .docx templates.
+ */
+export async function renderWriteoffActsFromTemplates(
+  groups: {
+    case1: EquipmentForDocx[];
+    case2: EquipmentForDocx[];
+    case3: EquipmentForDocx[];
+  },
+  templates: Record<WriteoffTemplateKey, LoadedTemplateState>,
+  actNumber: string = '',
+  options: WriteoffDocxOptions = {}
+): Promise<Buffer> {
+  const partBuffers: Buffer[] = [];
+
+  if (groups.case1.length > 0) {
+    const tpl = templates.case1_act;
+    if (tpl.customDocxBuffer) {
+      const itemVals = buildCase1ActItemPlaceholders(groups.case1, actNumber, options, tpl.requisites);
+      partBuffers.push(await renderPerItemSectionTemplateDocx(tpl.customDocxBuffer, itemVals));
+    } else {
+      partBuffers.push(
+        await generateWriteoffDocx(groups.case1, actNumber, {
+          ...options,
+          requisites: tpl.requisites,
+        })
+      );
+    }
+  }
+
+  if (groups.case2.length > 0) {
+    const tpl = templates.case2_act;
+    if (tpl.customDocxBuffer) {
+      const itemVals = buildCase2ActItemPlaceholders(groups.case2, options, tpl.requisites);
+      partBuffers.push(await renderPerItemSectionTemplateDocx(tpl.customDocxBuffer, itemVals));
+    } else {
+      partBuffers.push(
+        await generateLowValueWriteoffActDocx(groups.case2, {
+          ...options,
+          requisites: tpl.requisites,
+        })
+      );
+    }
+  }
+
+  if (groups.case3.length > 0) {
+    const tpl = templates.case3_act;
+    if (tpl.customDocxBuffer) {
+      const { docValues, itemValues } = buildCase3ActPlaceholders(
+        groups.case3,
+        actNumber,
+        options,
+        tpl.requisites
+      );
+      partBuffers.push(
+        await renderTableTemplateDocx(tpl.customDocxBuffer, docValues, itemValues, {
+          mode: 'case3_act',
+        })
+      );
+    } else {
+      partBuffers.push(
+        await generateLowValueNoDmWriteoffActDocx(groups.case3, actNumber, {
+          ...options,
+          requisites: tpl.requisites,
+        })
+      );
+    }
+  }
+
+  return await mergeDocxBuffers(partBuffers);
+}
+
+/**
+ * Renders Transfer Invoices (ОКУД 0501460 / Форма 434) honoring both saved DB requisites
+ * and custom uploaded .docx templates.
+ */
+export async function renderInvoicesFromTemplates(
+  groups: {
+    case1: EquipmentForDocx[];
+    case2: EquipmentForDocx[];
+  },
+  templates: Record<WriteoffTemplateKey, LoadedTemplateState>,
+  options: TransferInvoiceOptions = {}
+): Promise<Buffer> {
+  const partBuffers: Buffer[] = [];
+
+  if (groups.case1.length > 0) {
+    const tpl = templates.case1_invoice;
+    if (tpl.customDocxBuffer) {
+      const { docValues, itemValues } = buildCase1InvoicePlaceholders(
+        groups.case1,
+        options,
+        tpl.requisites
+      );
+      partBuffers.push(
+        await renderTableTemplateDocx(tpl.customDocxBuffer, docValues, itemValues, {
+          mode: 'invoice',
+        })
+      );
+    } else {
+      partBuffers.push(
+        await generateTransferInvoiceDocx(groups.case1, {
+          ...options,
+          requisites: tpl.requisites,
+        })
+      );
+    }
+  }
+
+  if (groups.case2.length > 0) {
+    const tpl = templates.case2_invoice;
+    if (tpl.customDocxBuffer) {
+      const { docValues, itemValues } = buildCase2InvoicePlaceholders(
+        groups.case2,
+        {
+          invoiceNumber: options.invoiceNumber,
+          invoiceDate: options.invoiceDate,
+          organization: options.organization,
+          department: options.sender,
+        },
+        tpl.requisites
+      );
+      partBuffers.push(
+        await renderTableTemplateDocx(tpl.customDocxBuffer, docValues, itemValues, {
+          mode: 'invoice',
+          minRows: 16,
+        })
+      );
+    } else {
+      partBuffers.push(
+        await generateLowValueInvoiceDocx(groups.case2, {
+          invoiceNumber: options.invoiceNumber,
+          invoiceDate: options.invoiceDate,
+          organization: options.organization,
+          department: options.sender,
+          requisites: tpl.requisites,
+        })
+      );
+    }
+  }
+
+  return await mergeDocxBuffers(partBuffers);
 }
 
 /**

@@ -32,6 +32,7 @@
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.3",
     "jsqr": "^1.4.0",
+    "jszip": "^3.10.2",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "pg": "^8.23.1",

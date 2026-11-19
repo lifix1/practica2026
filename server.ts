@@ -44,14 +44,22 @@ import {
   detectEquipmentWriteoffCase,
   generateQrDocx,
   generateGroupQrDocx,
-  generateWriteoffDocx,
-  generateTransferInvoiceDocx,
-  generateLowValueWriteoffActDocx,
-  generateLowValueInvoiceDocx,
-  generateLowValueNoDmWriteoffActDocx,
-  generateMixedWriteoffActsDocx,
-  generateMixedInvoicesDocx,
+  generateEditableTemplateDocx,
+  renderWriteoffActsFromTemplates,
+  renderInvoicesFromTemplates,
 } from './src/server/docx-generator.ts';
+import {
+  clearCustomTemplateDocx,
+  getAllWriteoffTemplates,
+  getWriteoffTemplate,
+  isValidWriteoffTemplateKey,
+  saveCustomTemplateDocx,
+  saveTemplateRequisites,
+  WRITEOFF_TEMPLATE_DEFINITIONS,
+  type LoadedTemplateState,
+  type WriteoffTemplateKey,
+} from './src/server/writeoff-templates.ts';
+import { validateDocxBuffer } from './src/server/docx-template-engine.ts';
 import {
   getAllAdditionalFieldsForType,
   validateAdditionalFields,
@@ -4445,6 +4453,179 @@ app.post('/api/writeoff/update-status', requireAuth, requireRole('ADMIN', 'ENGIN
   }
 });
 
+async function getWriteoffTemplateMap(): Promise<Record<WriteoffTemplateKey, LoadedTemplateState>> {
+  const list = await getAllWriteoffTemplates();
+  return Object.fromEntries(list.map((t) => [t.key, t])) as Record<
+    WriteoffTemplateKey,
+    LoadedTemplateState
+  >;
+}
+
+// List all Writeoff Act & Invoice Templates + Requisites
+app.get('/api/writeoff/templates', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
+  try {
+    const list = await getAllWriteoffTemplates();
+    res.json({
+      templates: list.map(({ customDocxBuffer: _buf, ...rest }) => rest),
+    });
+  } catch (error: any) {
+    console.error('Error listing writeoff templates:', error);
+    res.status(500).json({ error: 'Ошибка загрузки шаблонов документов' });
+  }
+});
+
+// Update structured requisites (Order №, Dates, Officials, Commission, MOL) for a template
+app.put('/api/writeoff/templates/:key/requisites', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
+  try {
+    const { key } = req.params;
+    if (!isValidWriteoffTemplateKey(key)) {
+      return res.status(400).json({ error: 'Некорректный ключ шаблона' });
+    }
+    const reset = Boolean(req.body?.reset);
+    const requisites = reset
+      ? WRITEOFF_TEMPLATE_DEFINITIONS[key].defaultRequisites
+      : req.body?.requisites || {};
+    const actorLogin = req.user?.login || 'system';
+    await saveTemplateRequisites(key, requisites, actorLogin);
+    const updated = await getWriteoffTemplate(key);
+    const { customDocxBuffer: _buf, ...safeTemplate } = updated;
+
+    await logAuditEvent({
+      req,
+      action: 'WRITEOFF_TEMPLATE_REQUISITES',
+      category: 'DOCUMENT',
+      severity: 'INFO',
+      entityType: 'writeoff_template',
+      entityId: key,
+      entityLabel: updated.title,
+      summary: reset
+        ? `Сброшены реквизиты шаблона «${updated.title}» к значениям по умолчанию`
+        : `Обновлены реквизиты и должностные лица шаблона «${updated.title}»`,
+      details: { key, reset },
+    });
+
+    res.json({ success: true, template: safeTemplate });
+  } catch (error: any) {
+    console.error('Error updating template requisites:', error);
+    res.status(500).json({ error: error.message || 'Ошибка сохранения реквизитов шаблона' });
+  }
+});
+
+// Download editable .docx template (either currently uploaded custom .docx or generated editable template with placeholders)
+app.get('/api/writeoff/templates/:key/download', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req, res) => {
+  try {
+    const { key } = req.params;
+    if (!isValidWriteoffTemplateKey(key)) {
+      return res.status(400).json({ error: 'Некорректный ключ шаблона' });
+    }
+    const tpl = await getWriteoffTemplate(key);
+    const fresh = req.query?.fresh === '1' || req.query?.fresh === 'true';
+
+    let buffer: Buffer;
+    let fileName: string;
+    if (!fresh && tpl.customDocxBuffer) {
+      buffer = tpl.customDocxBuffer;
+      fileName = tpl.customFileName || tpl.defaultFileName;
+    } else {
+      buffer = await generateEditableTemplateDocx(key, tpl.requisites);
+      fileName = tpl.defaultFileName;
+    }
+
+    const safeAsciiName = fileName.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${safeAsciiName}"`);
+    res.send(buffer);
+  } catch (error: any) {
+    console.error('Error downloading editable template:', error);
+    res.status(500).json({ error: 'Ошибка выгрузки шаблона .docx' });
+  }
+});
+
+// Upload edited .docx template file (stored persistently in PostgreSQL)
+app.post('/api/writeoff/templates/:key/upload', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
+  try {
+    const { key } = req.params;
+    if (!isValidWriteoffTemplateKey(key)) {
+      return res.status(400).json({ error: 'Некорректный ключ шаблона' });
+    }
+    const rawBase64 = String(req.body?.fileBase64 || '').trim();
+    const rawFileName = String(req.body?.fileName || '').trim() || WRITEOFF_TEMPLATE_DEFINITIONS[key].defaultFileName;
+    if (!rawBase64) {
+      return res.status(400).json({ error: 'Не передано содержимое файла .docx' });
+    }
+    const cleanedBase64 = rawBase64.replace(/^data:[^;]+;base64,/i, '');
+    const buffer = Buffer.from(cleanedBase64, 'base64');
+    if (buffer.length > 8 * 1024 * 1024) {
+      return res.status(400).json({ error: 'Размер файла .docx превышает допустимый лимит 8 МБ' });
+    }
+
+    const validation = await validateDocxBuffer(buffer);
+    if (!validation.valid) {
+      return res.status(400).json({ error: validation.error || 'Некорректный файл .docx' });
+    }
+
+    const safeFileName = rawFileName.toLowerCase().endsWith('.docx')
+      ? rawFileName.slice(0, 120)
+      : `${rawFileName.slice(0, 110)}.docx`;
+
+    const actorLogin = req.user?.login || 'system';
+    await saveCustomTemplateDocx(key, buffer, safeFileName, actorLogin);
+    const updated = await getWriteoffTemplate(key);
+    const { customDocxBuffer: _buf, ...safeTemplate } = updated;
+
+    await logAuditEvent({
+      req,
+      action: 'WRITEOFF_TEMPLATE_UPLOAD',
+      category: 'DOCUMENT',
+      severity: 'INFO',
+      entityType: 'writeoff_template',
+      entityId: key,
+      entityLabel: updated.title,
+      summary: `Загружен пользовательский Word-шаблон «${safeFileName}» для «${updated.title}»`,
+      details: { key, fileName: safeFileName, sizeBytes: buffer.length },
+    });
+
+    res.json({ success: true, template: safeTemplate });
+  } catch (error: any) {
+    console.error('Error uploading custom .docx template:', error);
+    res.status(500).json({ error: error.message || 'Ошибка сохранения Word-шаблона' });
+  }
+});
+
+// Remove custom .docx template and revert to built-in generator
+app.delete('/api/writeoff/templates/:key/custom-docx', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
+  try {
+    const { key } = req.params;
+    if (!isValidWriteoffTemplateKey(key)) {
+      return res.status(400).json({ error: 'Некорректный ключ шаблона' });
+    }
+    const actorLogin = req.user?.login || 'system';
+    await clearCustomTemplateDocx(key, actorLogin);
+    const updated = await getWriteoffTemplate(key);
+    const { customDocxBuffer: _buf, ...safeTemplate } = updated;
+
+    await logAuditEvent({
+      req,
+      action: 'WRITEOFF_TEMPLATE_RESET_DOCX',
+      category: 'DOCUMENT',
+      severity: 'INFO',
+      entityType: 'writeoff_template',
+      entityId: key,
+      entityLabel: updated.title,
+      summary: `Сброшен пользовательский .docx шаблон для «${updated.title}» (возврат к встроенному)`,
+      details: { key },
+    });
+
+    res.json({ success: true, template: safeTemplate });
+  } catch (error: any) {
+    console.error('Error resetting custom .docx template:', error);
+    res.status(500).json({ error: 'Ошибка сброса пользовательского шаблона' });
+  }
+});
+
 // Download Sample Writeoff Act DOCX (Case 1 example matching accounting template)
 app.get('/api/writeoff/sample-act', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
   try {
@@ -4466,10 +4647,16 @@ app.get('/api/writeoff/sample-act', requireAuth, requireRole('ADMIN', 'ENGINEER'
       },
     ];
 
-    const buffer = await generateWriteoffDocx(sampleItems, '', {
-      writeoffDate: '2026-10-21',
-      reason: 'начисленная амортизация составляет 100%',
-    });
+    const templatesMap = await getWriteoffTemplateMap();
+    const buffer = await renderWriteoffActsFromTemplates(
+      { case1: sampleItems, case2: [], case3: [] },
+      templatesMap,
+      '',
+      {
+        writeoffDate: '2026-10-21',
+        reason: 'начисленная амортизация составляет 100%',
+      }
+    );
 
     res.setHeader(
       'Content-Type',
@@ -4540,10 +4727,15 @@ app.get('/api/writeoff/sample-invoice', requireAuth, requireRole('ADMIN', 'ENGIN
       },
     ];
 
-    const buffer = await generateTransferInvoiceDocx(sampleItems, {
-      invoiceNumber: '',
-      invoiceDate: '2026-10-21',
-    });
+    const templatesMap = await getWriteoffTemplateMap();
+    const buffer = await renderInvoicesFromTemplates(
+      { case1: sampleItems, case2: [] },
+      templatesMap,
+      {
+        invoiceNumber: '',
+        invoiceDate: '2026-10-21',
+      }
+    );
 
     res.setHeader(
       'Content-Type',
@@ -4582,9 +4774,15 @@ app.get('/api/writeoff/sample-act-case2', requireAuth, requireRole('ADMIN', 'ENG
       },
     ];
 
-    const buffer = await generateLowValueWriteoffActDocx(sampleItems, {
-      writeoffDate: '2026-10-21',
-    });
+    const templatesMap = await getWriteoffTemplateMap();
+    const buffer = await renderWriteoffActsFromTemplates(
+      { case1: [], case2: sampleItems, case3: [] },
+      templatesMap,
+      '',
+      {
+        writeoffDate: '2026-10-21',
+      }
+    );
 
     res.setHeader(
       'Content-Type',
@@ -4655,9 +4853,14 @@ app.get('/api/writeoff/sample-invoice-case2', requireAuth, requireRole('ADMIN', 
       },
     ];
 
-    const buffer = await generateLowValueInvoiceDocx(sampleItems, {
-      invoiceDate: '2026-10-21',
-    });
+    const templatesMap = await getWriteoffTemplateMap();
+    const buffer = await renderInvoicesFromTemplates(
+      { case1: [], case2: sampleItems },
+      templatesMap,
+      {
+        invoiceDate: '2026-10-21',
+      }
+    );
 
     res.setHeader(
       'Content-Type',
@@ -4728,9 +4931,15 @@ app.get('/api/writeoff/sample-act-case3', requireAuth, requireRole('ADMIN', 'ENG
       },
     ];
 
-    const buffer = await generateLowValueNoDmWriteoffActDocx(sampleItems, '', {
-      writeoffDate: '2026-10-21',
-    });
+    const templatesMap = await getWriteoffTemplateMap();
+    const buffer = await renderWriteoffActsFromTemplates(
+      { case1: [], case2: [], case3: sampleItems },
+      templatesMap,
+      '',
+      {
+        writeoffDate: '2026-10-21',
+      }
+    );
 
     res.setHeader(
       'Content-Type',
@@ -4810,6 +5019,8 @@ async function handleGenerateActRequest(req: any, res: any) {
       recivedRaw: i.recived,
     }));
 
+    const templatesMap = await getWriteoffTemplateMap();
+
     let buffer: Buffer;
     let resolvedCaseLabel: string;
     let asciiFilename: string;
@@ -4818,31 +5029,26 @@ async function handleGenerateActRequest(req: any, res: any) {
 
     if (caseTypeParam === 'case1' || caseTypeParam === 'case2' || caseTypeParam === 'case3') {
       resolvedCaseLabel = caseTypeParam;
-      buffer =
-        caseTypeParam === 'case3'
-          ? await generateLowValueNoDmWriteoffActDocx(formatted, String(actNumberParam || ''), {
-              writeoffDate: writeoffDateParam,
-              actDate: writeoffDateParam,
-              organization: organizationParam ? String(organizationParam) : undefined,
-              department: departmentParam ? String(departmentParam) : undefined,
-            })
-          : caseTypeParam === 'case2'
-          ? await generateLowValueWriteoffActDocx(formatted, {
-              writeoffDate: writeoffDateParam,
-              actDate: writeoffDateParam,
-              reason: req.body?.reason || req.query?.reason,
-              technicalConclusionNumber: String(techConclusionParam),
-              organization: organizationParam ? String(organizationParam) : undefined,
-              department: departmentParam ? String(departmentParam) : undefined,
-            })
-          : await generateWriteoffDocx(formatted, String(actNumberParam || ''), {
-              writeoffDate: writeoffDateParam,
-              actDate: writeoffDateParam,
-              reason: String(reasonParam),
-              technicalConclusionNumber: String(techConclusionParam),
-              organization: organizationParam ? String(organizationParam) : undefined,
-              department: departmentParam ? String(departmentParam) : undefined,
-            });
+      buffer = await renderWriteoffActsFromTemplates(
+        {
+          case1: caseTypeParam === 'case1' ? formatted : [],
+          case2: caseTypeParam === 'case2' ? formatted : [],
+          case3: caseTypeParam === 'case3' ? formatted : [],
+        },
+        templatesMap,
+        String(actNumberParam || ''),
+        {
+          writeoffDate: writeoffDateParam,
+          actDate: writeoffDateParam,
+          reason:
+            caseTypeParam === 'case2'
+              ? req.body?.reason || req.query?.reason
+              : String(reasonParam),
+          technicalConclusionNumber: String(techConclusionParam),
+          organization: organizationParam ? String(organizationParam) : undefined,
+          department: departmentParam ? String(departmentParam) : undefined,
+        }
+      );
       asciiFilename =
         caseTypeParam === 'case3'
           ? `akt-malotsenka-bez-dm-${formatted.length}-poz-${dateTag}.docx`
@@ -4877,10 +5083,9 @@ async function handleGenerateActRequest(req: any, res: any) {
 
       resolvedCaseLabel = presentCases.length === 1 ? presentCases[0] : presentCases.join('+');
 
-      buffer = await generateMixedWriteoffActsDocx(
-        case1Items,
-        case2Items,
-        case3Items,
+      buffer = await renderWriteoffActsFromTemplates(
+        { case1: case1Items, case2: case2Items, case3: case3Items },
+        templatesMap,
         String(actNumberParam || ''),
         {
           writeoffDate: writeoffDateParam,
@@ -4999,6 +5204,8 @@ async function handleGenerateInvoiceRequest(req: any, res: any) {
       recivedRaw: i.recived,
     }));
 
+    const templatesMap = await getWriteoffTemplateMap();
+
     let buffer: Buffer;
     let asciiFilename: string;
     let exportedCount = formatted.length;
@@ -5006,19 +5213,20 @@ async function handleGenerateInvoiceRequest(req: any, res: any) {
 
     if (caseTypeParam === 'case1' || caseTypeParam === 'case2') {
       const isLowValue = caseTypeParam === 'case2';
-      buffer = isLowValue
-        ? await generateLowValueInvoiceDocx(formatted, {
-            invoiceNumber: String(invoiceNumber),
-            invoiceDate,
-            department: String(sender),
-          })
-        : await generateTransferInvoiceDocx(formatted, {
-            invoiceNumber: String(invoiceNumber),
-            invoiceDate,
-            sender: String(sender),
-            recipient: String(recipient),
-            note: String(note),
-          });
+      buffer = await renderInvoicesFromTemplates(
+        {
+          case1: isLowValue ? [] : formatted,
+          case2: isLowValue ? formatted : [],
+        },
+        templatesMap,
+        {
+          invoiceNumber: String(invoiceNumber),
+          invoiceDate,
+          sender: String(sender),
+          recipient: String(recipient),
+          note: String(note),
+        }
+      );
       asciiFilename = isLowValue
         ? `nakladnaya-forma-434-${dateTag}.docx`
         : `nakladnaya-CIT-0501460-${dateTag}.docx`;
@@ -5039,13 +5247,17 @@ async function handleGenerateInvoiceRequest(req: any, res: any) {
         });
       }
 
-      buffer = await generateMixedInvoicesDocx(case1Items, case2Items, {
-        invoiceNumber: String(invoiceNumber),
-        invoiceDate,
-        sender: String(sender),
-        recipient: String(recipient),
-        note: String(note),
-      });
+      buffer = await renderInvoicesFromTemplates(
+        { case1: case1Items, case2: case2Items },
+        templatesMap,
+        {
+          invoiceNumber: String(invoiceNumber),
+          invoiceDate,
+          sender: String(sender),
+          recipient: String(recipient),
+          note: String(note),
+        }
+      );
 
       asciiFilename =
         case1Items.length > 0 && case2Items.length > 0

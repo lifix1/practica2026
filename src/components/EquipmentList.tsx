@@ -126,6 +126,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
   // Bulk Writeoff Modal
   const [showWriteoffModal, setShowWriteoffModal] = useState(false);
   const [writeoffState, setWriteoffState] = useState<'PREPARING' | 'DOCUMENTS_PREPARATION' | 'WRITTEN_OFF'>('PREPARING');
+  const [confirmFinalWriteoff, setConfirmFinalWriteoff] = useState(false);
 
   // Bulk Transfer Modal
   const [showTransferModal, setShowTransferModal] = useState(false);
@@ -416,6 +417,10 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
   // Bulk update writeoff status
   const handleBulkWriteoffSubmit = async () => {
     if (selectedIds.length === 0) return;
+    if (writeoffState === 'WRITTEN_OFF' && !confirmFinalWriteoff) {
+      setConfirmFinalWriteoff(true);
+      return;
+    }
     try {
       const res = await apiFetch('/api/writeoff/update-status', {
         method: 'POST',
@@ -429,6 +434,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
 
       if (!res.ok) throw new Error('Ошибка обновления статуса списания');
       setShowWriteoffModal(false);
+      setConfirmFinalWriteoff(false);
       setSelectedIds([]);
       fetchEquipment();
     } catch (err: any) {
@@ -1525,7 +1531,10 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
               </label>
               <select
                 value={writeoffState}
-                onChange={(e: any) => setWriteoffState(e.target.value)}
+                onChange={(e: any) => {
+                  setWriteoffState(e.target.value);
+                  setConfirmFinalWriteoff(false);
+                }}
                 className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none"
               >
                 <option value="PREPARING">Готовится к списанию</option>
@@ -1535,10 +1544,22 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                 <option value="WRITTEN_OFF">Списано с баланса</option>
               </select>
             </div>
+            {confirmFinalWriteoff && writeoffState === 'WRITTEN_OFF' && (
+              <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 space-y-1">
+                <div className="font-bold">Подтвердите окончательное списание</div>
+                <p>
+                  Выбранное оборудование ({selectedIds.length} ед.) будет окончательно списано с
+                  баланса, а его редактирование, выдача и инвентаризация — заблокированы.
+                </p>
+              </div>
+            )}
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setShowWriteoffModal(false)}
+                onClick={() => {
+                  setShowWriteoffModal(false);
+                  setConfirmFinalWriteoff(false);
+                }}
                 className="px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl"
               >
                 Отмена
@@ -1546,9 +1567,15 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
               <button
                 type="button"
                 onClick={handleBulkWriteoffSubmit}
-                className="px-4 py-2 text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white rounded-xl"
+                className={`px-4 py-2 text-xs font-bold text-white rounded-xl ${
+                  confirmFinalWriteoff && writeoffState === 'WRITTEN_OFF'
+                    ? 'bg-red-600 hover:bg-red-700'
+                    : 'bg-blue-600 hover:bg-blue-700'
+                }`}
               >
-                Применить
+                {confirmFinalWriteoff && writeoffState === 'WRITTEN_OFF'
+                  ? 'Подтвердить списание'
+                  : 'Применить'}
               </button>
             </div>
           </div>

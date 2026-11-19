@@ -228,6 +228,19 @@ export async function ensureTablesExist() {
     await db.execute(sql`
       CREATE INDEX IF NOT EXISTS idx_audit_log_severity ON audit_log (severity);
     `);
+
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS writeoff_template (
+        template_key TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        requisites JSON NOT NULL DEFAULT '{}',
+        custom_docx_base64 TEXT,
+        custom_file_name TEXT,
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_by TEXT
+      );
+    `);
   } catch (err: any) {
     console.log('ensureTablesExist notice:', err?.message || err);
   }

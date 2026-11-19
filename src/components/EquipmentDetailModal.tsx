@@ -67,6 +67,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
   // Writeoff modal & status state
   const [showWriteoffModal, setShowWriteoffModal] = useState(false);
   const [targetWriteoffState, setTargetWriteoffState] = useState<'PREPARING' | 'DOCUMENTS_PREPARATION' | 'WRITTEN_OFF'>('DOCUMENTS_PREPARATION');
+  const [confirmFinalWriteoff, setConfirmFinalWriteoff] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<{
     type: 'success' | 'error';
@@ -334,6 +335,10 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
   const handleWriteoffSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!equipmentId) return;
+    if (targetWriteoffState === 'WRITTEN_OFF' && !confirmFinalWriteoff) {
+      setConfirmFinalWriteoff(true);
+      return;
+    }
     try {
       const res = await apiFetch('/api/writeoff/update-status', {
         method: 'POST',
@@ -348,6 +353,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       if (!res.ok) throw new Error(resData.error || 'Ошибка списания оборудования');
 
       setShowWriteoffModal(false);
+      setConfirmFinalWriteoff(false);
       fetchDetail();
       onReloadList();
     } catch (e: any) {
@@ -1280,7 +1286,10 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                 Списание единицы оборудования
               </h3>
               <button
-                onClick={() => setShowWriteoffModal(false)}
+                onClick={() => {
+                  setShowWriteoffModal(false);
+                  setConfirmFinalWriteoff(false);
+                }}
                 className="text-slate-400 hover:text-slate-600"
               >
                 <X className="w-5 h-5" />
@@ -1307,7 +1316,10 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                 </label>
                 <select
                   value={targetWriteoffState}
-                  onChange={(e: any) => setTargetWriteoffState(e.target.value)}
+                  onChange={(e: any) => {
+                    setTargetWriteoffState(e.target.value);
+                    setConfirmFinalWriteoff(false);
+                  }}
                   className="w-full p-2.5 border border-slate-300 rounded-xl outline-none font-medium"
                 >
                   <option value="PREPARING">Готовится к списанию</option>
@@ -1324,6 +1336,16 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                     : 'Предварительное согласование перед списанием.'}
                 </p>
               </div>
+
+              {confirmFinalWriteoff && targetWriteoffState === 'WRITTEN_OFF' && (
+                <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 space-y-1">
+                  <div className="font-bold">Подтвердите завершение списания</div>
+                  <p>
+                    Позиция будет окончательно переведена в статус «Списано с баланса». После этого
+                    редактирование, выдача и инвентаризация будут заблокированы.
+                  </p>
+                </div>
+              )}
 
               <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl space-y-2">
                 <div className="font-semibold text-emerald-950 flex items-center justify-between">
@@ -1345,7 +1367,10 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
                 <button
                   type="button"
-                  onClick={() => setShowWriteoffModal(false)}
+                  onClick={() => {
+                    setShowWriteoffModal(false);
+                    setConfirmFinalWriteoff(false);
+                  }}
                   className="px-3 py-2 text-slate-600 hover:bg-slate-100 rounded-xl font-medium"
                 >
                   Отмена
@@ -1354,7 +1379,9 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                   type="submit"
                   className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl font-bold shadow-xs"
                 >
-                  Сохранить статус
+                  {confirmFinalWriteoff && targetWriteoffState === 'WRITTEN_OFF'
+                    ? 'Подтвердить списание'
+                    : 'Сохранить статус'}
                 </button>
               </div>
             </form>

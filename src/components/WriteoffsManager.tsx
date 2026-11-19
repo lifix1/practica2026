@@ -12,9 +12,11 @@ import {
   Truck,
   Package,
   Layers,
+  Settings2,
 } from 'lucide-react';
 import type { Equipment, User } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
+import { WriteoffTemplatesModal } from './WriteoffTemplatesModal.tsx';
 
 interface WriteoffsManagerProps {
   currentUser: User | null;
@@ -109,6 +111,14 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
   const [downloadActAfter, setDownloadActAfter] = useState(true);
   const [downloadInvoiceAfter, setDownloadInvoiceAfter] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
+  const [showTemplatesModal, setShowTemplatesModal] = useState(false);
+  const [confirmWriteoffTarget, setConfirmWriteoffTarget] = useState<
+    | { mode: 'single'; item: Equipment }
+    | { mode: 'bulk'; ids: number[]; items: Equipment[] }
+    | { mode: 'create'; ids: number[]; items: Equipment[] }
+    | null
+  >(null);
+  const [confirmWriteoffLoading, setConfirmWriteoffLoading] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(
     null
   );
@@ -357,9 +367,8 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
     }
   };
 
-  // Submit new writeoff
-  const handleSubmitNewWriteoff = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Execute create writeoff request (optionally after confirmation when targetState === 'WRITTEN_OFF')
+  const executeNewWriteoff = async () => {
     if (selectedEqIds.length === 0) return;
 
     setActionLoading(true);
@@ -425,40 +434,69 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
     }
   };
 
-  // Quick change status for single item
-  const handleQuickStatusChange = async (
-    eqId: number,
-    newState: 'PREPARING' | 'DOCUMENTS_PREPARATION' | 'WRITTEN_OFF'
-  ) => {
+  const handleSubmitNewWriteoff = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (selectedEqIds.length === 0) return;
+    if (targetState === 'WRITTEN_OFF') {
+      const selectedObjs = availableEquipment.filter((eq) => selectedEqIds.includes(eq.id));
+      setConfirmWriteoffTarget({
+        mode: 'create',
+        ids: [...selectedEqIds],
+        items: selectedObjs,
+      });
+      return;
+    }
+    await executeNewWriteoff();
+  };
+
+  // Confirmed irreversible transition into WRITTEN_OFF
+  const handleConfirmWriteoffCompletion = async () => {
+    if (!confirmWriteoffTarget) return;
+    setConfirmWriteoffLoading(true);
     try {
+      if (confirmWriteoffTarget.mode === 'create') {
+        await executeNewWriteoff();
+        setConfirmWriteoffTarget(null);
+        return;
+      }
+
+      const targetIds =
+        confirmWriteoffTarget.mode === 'single'
+          ? [confirmWriteoffTarget.item.id]
+          : confirmWriteoffTarget.ids;
+
       const res = await apiFetch('/api/writeoff/update-status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          equipment_ids: [eqId],
-          state: newState,
-          writeoff_date:
-            newState === 'WRITTEN_OFF'
-              ? docDate
-                ? new Date(`${docDate}T00:00:00Z`).toISOString()
-                : new Date().toISOString()
-              : null,
+          equipment_ids: targetIds,
+          state: 'WRITTEN_OFF',
+          writeoff_date: docDate
+            ? new Date(`${docDate}T00:00:00Z`).toISOString()
+            : new Date().toISOString(),
         }),
       });
-      if (!res.ok) throw new Error('Ошибка обновления статуса');
-      fetchItems();
-      setFeedbackMsg({
-        type: 'success',
-        text: `Статус списания изменен на «${
-          newState === 'WRITTEN_OFF'
-            ? 'Списано'
-            : newState === 'DOCUMENTS_PREPARATION'
-            ? 'Подготовка документов'
-            : 'Готовится к списанию'
-        }»`,
-      });
+      const resData = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(resData.error || 'Ошибка завершения списания');
+
+      if (confirmWriteoffTarget.mode === 'bulk') {
+        setSelectedIds([]);
+      } else {
+        setSelectedIds((prev) => prev.filter((id) => id !== confirmWriteoffTarget.item.id));
+      }
+
+      const label =
+        confirmWriteoffTarget.mode === 'single'
+          ? `Оборудование «${confirmWriteoffTarget.item.name}» переведено в статус «Списано»`
+          : `Выбранное оборудование (${targetIds.length} ед.) переведено в статус «Списано»!`;
+
+      setConfirmWriteoffTarget(null);
+      await fetchItems();
+      setFeedbackMsg({ type: 'success', text: label });
     } catch (e: any) {
-      setFeedbackMsg({ type: 'error', text: e.message });
+      setFeedbackMsg({ type: 'error', text: e.message || 'Ошибка завершения списания' });
+    } finally {
+      setConfirmWriteoffLoading(false);
     }
   };
 
@@ -533,17 +571,28 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
           </button>
 
           {canManage && (
-            <button
-              onClick={() => {
-                fetchAvailableEquipment();
-                setSelectedEqIds([]);
-                setShowNewWriteoffModal(true);
-              }}
-              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold shadow-xs transition-colors inline-flex items-center gap-1.5"
-            >
-              <Plus className="w-4 h-4" />
-              Оформить списание
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => setShowTemplatesModal(true)}
+                className="px-3.5 py-2 bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 rounded-xl text-xs font-semibold shadow-xs transition-colors inline-flex items-center gap-1.5"
+                title="Редактировать № приказа, должностных лиц и загружать свои Word-шаблоны (.docx)"
+              >
+                <Settings2 className="w-4 h-4 text-blue-600" />
+                Шаблоны документов
+              </button>
+              <button
+                onClick={() => {
+                  fetchAvailableEquipment();
+                  setSelectedEqIds([]);
+                  setShowNewWriteoffModal(true);
+                }}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold shadow-xs transition-colors inline-flex items-center gap-1.5"
+              >
+                <Plus className="w-4 h-4" />
+                Оформить списание
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -744,30 +793,14 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
             })()}
             {canManage && (
               <button
-                onClick={async () => {
-                  try {
-                    await apiFetch('/api/writeoff/update-status', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({
-                        equipment_ids: selectedIds,
-                        state: 'WRITTEN_OFF',
-                        writeoff_date: docDate
-                          ? new Date(`${docDate}T00:00:00Z`).toISOString()
-                          : new Date().toISOString(),
-                      }),
-                    });
-                    const count = selectedIds.length;
-                    setSelectedIds([]);
-                    fetchItems();
-                    setFeedbackMsg({
-                      type: 'success',
-                      text: `Выбранное оборудование (${count} ед.) переведено в статус «Списано»!`,
-                    });
-                  } catch (e: any) {
-                    setFeedbackMsg({ type: 'error', text: e.message });
-                  }
-                }}
+                type="button"
+                onClick={() =>
+                  setConfirmWriteoffTarget({
+                    mode: 'bulk',
+                    ids: [...selectedIds],
+                    items: items.filter((it) => selectedIds.includes(it.id)),
+                  })
+                }
                 className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-xs"
               >
                 Перевести в «Списано»
@@ -970,7 +1003,8 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
 
                     {canManage && item.writeoffState !== 'WRITTEN_OFF' && (
                       <button
-                        onClick={() => handleQuickStatusChange(item.id, 'WRITTEN_OFF')}
+                        type="button"
+                        onClick={() => setConfirmWriteoffTarget({ mode: 'single', item })}
                         className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium"
                       >
                         Завершить списание
@@ -1166,6 +1200,104 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
           </div>
         </div>
       )}
+
+      {/* Confirmation Modal for Completing Write-off (WRITTEN_OFF) */}
+      {confirmWriteoffTarget && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-900/55 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-red-100 text-red-600 flex items-center justify-center shrink-0">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-slate-900">
+                    Завершение списания оборудования
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Дата списания:{' '}
+                    <span className="font-semibold text-slate-700 tabular-nums">
+                      {docDate
+                        ? new Date(`${docDate}T00:00:00`).toLocaleDateString('ru-RU')
+                        : new Date().toLocaleDateString('ru-RU')}
+                    </span>
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !confirmWriteoffLoading && setConfirmWriteoffTarget(null)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1.5">
+              {confirmWriteoffTarget.mode === 'single' ? (
+                <>
+                  <div className="font-semibold text-slate-900">
+                    {confirmWriteoffTarget.item.name}
+                  </div>
+                  <div className="text-[11px] text-slate-600 font-mono tabular-nums">
+                    Инв. № {confirmWriteoffTarget.item.inventory_number || 'б/н'} · ID #{confirmWriteoffTarget.item.id}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="font-semibold text-slate-900">
+                    Выбрано единиц оборудования: {confirmWriteoffTarget.ids.length} шт.
+                  </div>
+                  <div className="max-h-28 overflow-y-auto divide-y divide-slate-200/70 pr-1">
+                    {confirmWriteoffTarget.items.map((eq) => (
+                      <div key={eq.id} className="py-1 flex items-center justify-between gap-2 text-[11px]">
+                        <span className="text-slate-800 truncate">{eq.name}</span>
+                        <span className="font-mono text-slate-500 shrink-0">
+                          {eq.inventory_number || `ID #${eq.id}`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Вы действительно хотите завершить списание и перевести{' '}
+              {confirmWriteoffTarget.mode === 'single' ? 'данную позицию' : 'выбранные позиции'} в
+              статус <strong className="text-slate-900">«Списано с баланса»</strong>? После
+              подтверждения редактирование карточки, выдача, инвентаризация и регистрация
+              неисправностей будут заблокированы.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setConfirmWriteoffTarget(null)}
+                disabled={confirmWriteoffLoading}
+                className="px-3.5 py-2 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-semibold"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmWriteoffCompletion}
+                disabled={confirmWriteoffLoading}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 disabled:bg-red-400 text-white rounded-xl text-xs font-bold shadow-xs"
+              >
+                {confirmWriteoffLoading ? 'Выполнение...' : 'Подтвердить списание'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Templates Editor Modal */}
+      <WriteoffTemplatesModal
+        isOpen={showTemplatesModal}
+        onClose={() => setShowTemplatesModal(false)}
+        onFeedback={(msg) => setFeedbackMsg(msg)}
+      />
     </div>
   );
 };
