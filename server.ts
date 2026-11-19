@@ -779,6 +779,70 @@ app.delete('/api/users/:id', requireAuth, requireRole('ADMIN'), async (req: Auth
 // 2. ROOMS & TYPES ROUTES
 // ==========================================
 
+function sanitizeRoomDetails(raw: any): Record<string, any> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {};
+  }
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'string') {
+      const trimmed = v.trim();
+      if (trimmed) out[k] = trimmed;
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+function parseOptionalFloor(raw: any): { valid: boolean; value: number | null } {
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return { valid: true, value: null };
+  }
+  const num = Number(raw);
+  if (!Number.isInteger(num)) {
+    return { valid: false, value: null };
+  }
+  return { valid: true, value: num };
+}
+
+async function resolveOrCreateRoomByName(
+  rawName: string,
+  req: any
+): Promise<{ id: number; number: string; created: boolean }> {
+  const cleanName = String(rawName || '').trim();
+  const allRooms = await db.select().from(rooms);
+  const existing = allRooms.find(
+    (r: any) => String(r.number || '').trim().toLowerCase() === cleanName.toLowerCase()
+  );
+  if (existing) {
+    return { id: Number(existing.id), number: existing.number, created: false };
+  }
+  const [created] = await db
+    .insert(rooms)
+    .values({
+      number: cleanName,
+      floor: null,
+      details: {},
+    })
+    .returning();
+
+  await logAuditEvent({
+    req,
+    action: 'ROOM_CREATE',
+    category: 'ADMIN',
+    severity: 'INFO',
+    entityType: 'room',
+    entityId: created.id,
+    entityLabel: created.number,
+    summary: `Добавлена локация «${created.number}» (при добавлении оборудования)`,
+    details: { roomId: created.id, number: created.number, floor: created.floor },
+  });
+
+  return { id: Number(created.id), number: created.number, created: true };
+}
+
 // Get Rooms
 app.get('/api/rooms', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
   try {
@@ -792,16 +856,33 @@ app.get('/api/rooms', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req
 // Create Room (Admin only)
 app.post('/api/rooms', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
-    const { number, floor } = req.body;
-    if (!number || floor === undefined) {
-      return res.status(400).json({ error: 'Номер кабинета и этаж обязательны' });
+    const { number, floor, details } = req.body;
+    const cleanNumber = String(number || '').trim();
+    if (!cleanNumber) {
+      return res.status(400).json({ error: 'Название локации обязательно' });
     }
+
+    const parsedFloor = parseOptionalFloor(floor);
+    if (!parsedFloor.valid) {
+      return res.status(400).json({ error: 'Этаж должен быть целым числом' });
+    }
+
+    const existingList = await db.select().from(rooms);
+    const duplicate = existingList.find(
+      (r: any) => String(r.number || '').trim().toLowerCase() === cleanNumber.toLowerCase()
+    );
+    if (duplicate) {
+      return res.status(400).json({ error: `Локация «${duplicate.number}» уже существует` });
+    }
+
+    const sanitizedDetails = sanitizeRoomDetails(details);
 
     const [newRoom] = await db
       .insert(rooms)
       .values({
-        number: String(number).trim(),
-        floor: Number(floor),
+        number: cleanNumber,
+        floor: parsedFloor.value,
+        details: sanitizedDetails,
       })
       .returning();
 
@@ -812,9 +893,14 @@ app.post('/api/rooms', requireAuth, requireRole('ADMIN'), async (req, res) => {
       severity: 'INFO',
       entityType: 'room',
       entityId: newRoom.id,
-      entityLabel: `Ауд. ${newRoom.number} (${newRoom.floor} этаж)`,
-      summary: `Добавлено помещение «${newRoom.number}» (${newRoom.floor} этаж)`,
-      details: { roomId: newRoom.id, number: newRoom.number, floor: newRoom.floor },
+      entityLabel: newRoom.number,
+      summary: `Добавлена локация «${newRoom.number}»`,
+      details: {
+        roomId: newRoom.id,
+        number: newRoom.number,
+        floor: newRoom.floor,
+        details: newRoom.details,
+      },
     });
 
     res.status(201).json(newRoom);
@@ -823,12 +909,12 @@ app.post('/api/rooms', requireAuth, requireRole('ADMIN'), async (req, res) => {
   }
 });
 
-// Delete Room (Admin only)
-app.delete('/api/rooms/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
+// Update Room (Admin only)
+app.put('/api/rooms/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
     const roomId = Number(req.params.id);
     if (!Number.isInteger(roomId) || roomId <= 0) {
-      return res.status(400).json({ error: 'Некорректный идентификатор кабинета' });
+      return res.status(400).json({ error: 'Некорректный идентификатор локации' });
     }
 
     const [existing] = await db
@@ -838,7 +924,89 @@ app.delete('/api/rooms/:id', requireAuth, requireRole('ADMIN'), async (req, res)
       .limit(1);
 
     if (!existing) {
-      return res.status(404).json({ error: 'Кабинет не найден' });
+      return res.status(404).json({ error: 'Локация не найдена' });
+    }
+
+    const { number, floor, details } = req.body;
+    const cleanNumber =
+      number !== undefined ? String(number || '').trim() : String(existing.number).trim();
+    if (!cleanNumber) {
+      return res.status(400).json({ error: 'Название локации не может быть пустым' });
+    }
+
+    const allRooms = await db.select().from(rooms);
+    const duplicate = allRooms.find(
+      (r: any) =>
+        Number(r.id) !== roomId &&
+        String(r.number || '').trim().toLowerCase() === cleanNumber.toLowerCase()
+    );
+    if (duplicate) {
+      return res.status(400).json({ error: `Локация «${duplicate.number}» уже существует` });
+    }
+
+    let nextFloor = existing.floor ?? null;
+    if (floor !== undefined) {
+      const parsedFloor = parseOptionalFloor(floor);
+      if (!parsedFloor.valid) {
+        return res.status(400).json({ error: 'Этаж должен быть целым числом' });
+      }
+      nextFloor = parsedFloor.value;
+    }
+
+    const nextDetails =
+      details !== undefined
+        ? sanitizeRoomDetails(details)
+        : sanitizeRoomDetails((existing as any).details);
+
+    const [updated] = await db
+      .update(rooms)
+      .set({
+        number: cleanNumber,
+        floor: nextFloor,
+        details: nextDetails,
+      })
+      .where(eq(rooms.id, roomId))
+      .returning();
+
+    await logAuditEvent({
+      req,
+      action: 'ROOM_UPDATE',
+      category: 'ADMIN',
+      severity: 'INFO',
+      entityType: 'room',
+      entityId: updated.id,
+      entityLabel: updated.number,
+      summary: `Обновлена локация «${updated.number}»`,
+      details: {
+        roomId: updated.id,
+        before: { number: existing.number, floor: existing.floor, details: (existing as any).details },
+        after: { number: updated.number, floor: updated.floor, details: (updated as any).details },
+      },
+    });
+
+    res.json(updated);
+  } catch (error: any) {
+    console.error('Update room error:', error);
+    res.status(500).json({ error: error.message || 'Ошибка обновления локации' });
+  }
+});
+
+// Delete Room (Admin only)
+app.delete('/api/rooms/:id', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const roomId = Number(req.params.id);
+    if (!Number.isInteger(roomId) || roomId <= 0) {
+      return res.status(400).json({ error: 'Некорректный идентификатор локации' });
+    }
+
+    const [existing] = await db
+      .select()
+      .from(rooms)
+      .where(eq(rooms.id, roomId))
+      .limit(1);
+
+    if (!existing) {
+      return res.status(404).json({ error: 'Локация не найдена' });
     }
 
     const [eqCount] = await db
@@ -848,7 +1016,7 @@ app.delete('/api/rooms/:id', requireAuth, requireRole('ADMIN'), async (req, res)
 
     if (Number(eqCount?.count || 0) > 0) {
       return res.status(400).json({
-        error: `Нельзя удалить кабинет № ${existing.number}: за ним закреплено ${eqCount.count} ед. оборудования. Сначала перенесите или удалите оборудование.`,
+        error: `Нельзя удалить локацию «${existing.number}»: за ней закреплено ${eqCount.count} ед. оборудования. Сначала перенесите или удалите оборудование.`,
       });
     }
 
@@ -867,15 +1035,15 @@ app.delete('/api/rooms/:id', requireAuth, requireRole('ADMIN'), async (req, res)
       severity: 'WARNING',
       entityType: 'room',
       entityId: existing.id,
-      entityLabel: `Ауд. ${existing.number} (${existing.floor} этаж)`,
-      summary: `Удалено помещение «${existing.number}» (${existing.floor} этаж)`,
+      entityLabel: existing.number,
+      summary: `Удалена локация «${existing.number}»`,
       details: { roomId: existing.id, number: existing.number, floor: existing.floor },
     });
 
     res.json({ success: true, deletedId: roomId });
   } catch (error: any) {
     console.error('Delete room error:', error);
-    res.status(500).json({ error: error.message || 'Ошибка удаления кабинета' });
+    res.status(500).json({ error: error.message || 'Ошибка удаления локации' });
   }
 });
 
@@ -1744,7 +1912,7 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
   try {
     const isRegularUser = req.user?.role === 'USER';
     const page = Math.max(1, Number(req.query.page) || 1);
-    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 15));
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 50));
     const offset = (page - 1) * limit;
 
     const search = req.query.search ? String(req.query.search).trim() : '';
@@ -2152,14 +2320,102 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
     }
 
     const total = filtered.length;
-    const paginatedItems = filtered.slice(offset, offset + limit).map((item: any) => {
-      if (!isRegularUser) return item;
+    const slicedItems = filtered.slice(offset, offset + limit);
+    const pageIds = slicedItems.map((i: any) => Number(i.id)).filter((id: number) => id > 0);
+
+    const activeTransferByEqId = new Map<number, any>();
+    const activeIssuesByEqId = new Map<number, any[]>();
+
+    if (pageIds.length > 0) {
+      if (!isRegularUser) {
+        const pageTransfers = await db
+          .select({
+            id: equipmentTransfers.id,
+            equipment_id: equipmentTransfers.equipment_id,
+            issued_to: equipmentTransfers.issued_to,
+            issued_at: equipmentTransfers.issued_at,
+            expected_return_at: equipmentTransfers.expected_return_at,
+          })
+          .from(equipmentTransfers)
+          .where(
+            and(
+              inArray(equipmentTransfers.equipment_id, pageIds),
+              isNull(equipmentTransfers.returned_at)
+            )
+          )
+          .orderBy(desc(equipmentTransfers.id));
+
+        for (const t of pageTransfers) {
+          if (!activeTransferByEqId.has(t.equipment_id)) {
+            activeTransferByEqId.set(t.equipment_id, {
+              id: t.id,
+              issued_to: t.issued_to,
+              issued_at: t.issued_at,
+              expected_return_at: t.expected_return_at,
+            });
+          }
+        }
+      }
+
+      const issueConditions: any[] = [
+        inArray(equipmentIssues.equipment_id, pageIds),
+        isNull(equipmentIssues.repaired_at),
+      ];
+      if (isRegularUser) {
+        issueConditions.push(eq(equipmentIssues.reported_by_user_id, req.user!.id));
+      }
+
+      const pageIssues = await db
+        .select({
+          id: equipmentIssues.id,
+          equipment_id: equipmentIssues.equipment_id,
+          state: equipmentIssues.state,
+          description: equipmentIssues.description,
+          broken_at: equipmentIssues.broken_at,
+        })
+        .from(equipmentIssues)
+        .where(and(...issueConditions))
+        .orderBy(desc(equipmentIssues.id));
+
+      for (const iss of pageIssues) {
+        const list = activeIssuesByEqId.get(iss.equipment_id) || [];
+        list.push({
+          id: iss.id,
+          state: iss.state,
+          description: iss.description,
+          broken_at: iss.broken_at,
+        });
+        activeIssuesByEqId.set(iss.equipment_id, list);
+      }
+    }
+
+    const resolveHighestIssue = (issues: any[]): 'CRITICAL_ISSUE' | 'ISSUE' | 'WEAR_AND_TEAR' | null => {
+      if (!issues || issues.length === 0) return null;
+      if (issues.some((i) => i.state === 'CRITICAL_ISSUE')) return 'CRITICAL_ISSUE';
+      if (issues.some((i) => i.state === 'ISSUE')) return 'ISSUE';
+      return 'WEAR_AND_TEAR';
+    };
+
+    const paginatedItems = slicedItems.map((item: any) => {
+      const issuesList = activeIssuesByEqId.get(item.id) || [];
+      const highestIssueState = resolveHighestIssue(issuesList);
+      if (!isRegularUser) {
+        return {
+          ...item,
+          activeTransfer: activeTransferByEqId.get(item.id) || null,
+          activeIssues: issuesList,
+          highestIssueState,
+        };
+      }
       return {
         ...item,
         initial_cost: null,
         residual_cost: null,
         writeoffState: null,
         writeoffDate: null,
+        activeTransfer: null,
+        activeIssues: issuesList,
+        highestIssueState,
       };
     });
 
@@ -2948,7 +3204,7 @@ function formatEquipmentDbError(error: any): string {
     return 'Оборудование с таким инвентарным номером уже зарегистрировано в системе. Укажите другой инвентарный номер.';
   }
   if (code === '23503' || msg.includes('foreign key constraint')) {
-    return 'Указанный тип оборудования или помещение не найдены в справочнике. Обновите страницу и выберите значения из списка.';
+    return 'Указанный тип оборудования или локация не найдены в справочнике. Обновите страницу и выберите значения из списка.';
   }
   if (code === '22P02' || code === '22003') {
     return 'Проверьте правильность числовых полей и дат — одно из значений имеет неверный формат.';
@@ -2980,6 +3236,7 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       initial_cost,
       residual_cost,
       room_id,
+      new_room_name,
       additional_fields,
     } = req.body;
 
@@ -2990,12 +3247,18 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
         : String(inventory_number).trim();
     const finalInventoryNumber: string | null = trimmedInv || null;
     const trimmedName = String(name || '').trim();
+    const trimmedNewRoomName =
+      typeof new_room_name === 'string' ? new_room_name.trim() : '';
 
     const hasTypeId = type_id !== undefined && type_id !== null && String(type_id).trim() !== '';
     const numericTypeId = hasTypeId ? Number(type_id) : NaN;
 
-    const hasRoomId = room_id !== undefined && room_id !== null && String(room_id).trim() !== '';
-    const numericRoomId = hasRoomId ? Number(room_id) : null;
+    const hasRoomId =
+      !trimmedNewRoomName &&
+      room_id !== undefined &&
+      room_id !== null &&
+      String(room_id).trim() !== '';
+    let numericRoomId: number | null = hasRoomId ? Number(room_id) : null;
 
     const hasRecived = recived !== undefined && recived !== null && String(recived).trim() !== '';
     const recivedDate = hasRecived ? new Date(recived) : null;
@@ -3007,10 +3270,10 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       formErrors.push('Выберите корректный тип оборудования из списка.');
     }
     if (hasRoomId && (!Number.isInteger(numericRoomId) || numericRoomId! <= 0)) {
-      formErrors.push('Выберите корректное помещение (аудиторию).');
+      formErrors.push('Выберите корректную локацию.');
     }
     if (hasRecived && (!recivedDate || isNaN(recivedDate.getTime()))) {
-      formErrors.push('Укажите корректную дату принятия к учёту.');
+      formErrors.push('Укажите корректную дату начала эксплуатации.');
     }
 
     const parsedInitialCost =
@@ -3055,7 +3318,10 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
       resolvedType = await ensureDefaultEquipmentType();
     }
 
-    if (numericRoomId !== null) {
+    if (trimmedNewRoomName) {
+      const resolvedRoom = await resolveOrCreateRoomByName(trimmedNewRoomName, req);
+      numericRoomId = resolvedRoom.id;
+    } else if (numericRoomId !== null) {
       const [foundRoom] = await db
         .select()
         .from(rooms)
@@ -3063,7 +3329,7 @@ app.post('/api/equipment', requireAuth, requireRole('ADMIN'), async (req, res) =
         .limit(1);
       if (!foundRoom) {
         return res.status(400).json({
-          error: 'Выбранное помещение не найдено. Обновите страницу и выберите аудиторию заново.',
+          error: 'Выбранная локация не найдена. Обновите страницу и выберите локацию заново.',
         });
       }
     }
@@ -3197,12 +3463,15 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
       initial_cost,
       residual_cost,
       room_id,
+      new_room_name,
       additional_fields,
     } = req.body;
 
     const formErrors: string[] = [];
     const hasTypeIdProvided = type_id !== undefined && type_id !== null && String(type_id).trim() !== '';
     let effectiveTypeId = hasTypeIdProvided ? Number(type_id) : existingItem.type_id;
+    const trimmedNewRoomName =
+      typeof new_room_name === 'string' ? new_room_name.trim() : '';
 
     if (name !== undefined && !String(name).trim()) {
       formErrors.push('Наименование оборудования не может быть пустым.');
@@ -3212,9 +3481,12 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
     }
 
     const hasRoomIdProvided =
-      room_id !== undefined && room_id !== null && String(room_id).trim() !== '';
+      !trimmedNewRoomName &&
+      room_id !== undefined &&
+      room_id !== null &&
+      String(room_id).trim() !== '';
     if (hasRoomIdProvided && (!Number.isInteger(Number(room_id)) || Number(room_id) <= 0)) {
-      formErrors.push('Выберите корректное помещение (аудиторию).');
+      formErrors.push('Выберите корректную локацию.');
     }
 
     const hasRecivedProvided =
@@ -3222,7 +3494,7 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
     if (hasRecivedProvided) {
       const parsedDate = new Date(recived);
       if (isNaN(parsedDate.getTime())) {
-        formErrors.push('Укажите корректную дату принятия к учёту.');
+        formErrors.push('Укажите корректную дату начала эксплуатации.');
       }
     }
     if (initial_cost !== undefined && initial_cost !== '' && initial_cost !== null) {
@@ -3308,7 +3580,11 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
       resolvedType = { id: Number(foundType.id), name: foundType.name };
     }
 
-    if (hasRoomIdProvided) {
+    let resolvedRoomIdForUpdate: number | null | undefined = undefined;
+    if (trimmedNewRoomName) {
+      const resolvedRoom = await resolveOrCreateRoomByName(trimmedNewRoomName, req);
+      resolvedRoomIdForUpdate = resolvedRoom.id;
+    } else if (hasRoomIdProvided) {
       const [foundRoom] = await db
         .select()
         .from(rooms)
@@ -3316,9 +3592,12 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
         .limit(1);
       if (!foundRoom) {
         return res.status(400).json({
-          error: 'Выбранное помещение не найдено в справочнике.',
+          error: 'Выбранная локация не найдена в справочнике.',
         });
       }
+      resolvedRoomIdForUpdate = Number(room_id);
+    } else if (room_id !== undefined) {
+      resolvedRoomIdForUpdate = null;
     }
 
     // Validate additional fields if provided
@@ -3367,8 +3646,8 @@ app.put('/api/equipment/:id', requireAuth, requireRole('ADMIN'), async (req, res
         updateData.residual_cost = Math.round(val * 100) / 100;
       }
     }
-    if (room_id !== undefined) {
-      updateData.room_id = hasRoomIdProvided ? Number(room_id) : null;
+    if (resolvedRoomIdForUpdate !== undefined) {
+      updateData.room_id = resolvedRoomIdForUpdate;
     }
     if (normalizedAfPayload !== undefined) {
       updateData.additional_fields = prepareAdditionalFieldsForStorage(normalizedAfPayload);
@@ -3601,7 +3880,7 @@ app.post('/api/equipment/qr-group', requireAuth, requireRole('ADMIN'), async (re
     const randomSuffix = Math.floor(1000 + Math.random() * 9000);
     const year = new Date().getFullYear();
     const code = `GRP-${year}-${randomSuffix}`;
-    const roomSuffix = items[0].roomNumber ? ` — ауд. ${items[0].roomNumber}` : '';
+    const roomSuffix = items[0].roomNumber ? ` — ${items[0].roomNumber}` : '';
     const autoName = name && name.trim()
       ? name.trim()
       : `Комплект: ${items.length} шт. («${items[0].name}»${items.length > 1 ? ` и др.${roomSuffix}` : ''})`;
@@ -4150,7 +4429,7 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       const notes = getVal('notes', 'Примечание', 'Примечания');
       const quantityRaw = getVal('Количество', 'Кол-во', 'quantity');
 
-      const cleanRoomStr = getVal('room_number', 'room_id', 'Помещение', 'Кабинет', 'Аудитория');
+      const cleanRoomStr = getVal('room_number', 'room_id', 'Локация', 'Помещение', 'Кабинет', 'Аудитория');
 
       const recivedRaw = getVal(
         'recived',
@@ -4266,7 +4545,7 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
         if (cLow.includes('нюанс')) condition = 'Есть нюансы';
         else if (cLow.includes('неремонт')) condition = 'Неремонтопригодно';
         else if (cLow.includes('вышл') || cLow.includes('ремонт')) {
-          condition = 'Вышло из строя (ремонт возможен)';
+          condition = 'Вышло из строя';
         }
       }
 
@@ -4304,11 +4583,11 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       const reservedKeys = new Set([
         'inventory_number', 'инвентарный номер', 'инвентарный №', 'инв. номер', 'инв номер', 'инв. №', '№ п/п',
         'name', 'наименование (по бухгалтерии)', 'наименование', 'наименование объекта', 'название',
-        'recived', 'received', 'дата принятия к учету', 'дата ввода в эксплуатацию', 'дата ввода', 'дата принятия', 'дата получения', 'дата',
+        'recived', 'received', 'дата начала эксплуатации', 'дата принятия к учету', 'дата ввода в эксплуатацию', 'дата ввода', 'дата принятия', 'дата получения', 'дата',
         'initial_cost', 'первоначальная стоимость', 'балансовая стоимость', 'стоимость',
         'residual_cost', 'остаточная стоимость',
         'количество', 'кол-во', 'quantity',
-        'room_number', 'room_id', 'помещение', 'кабинет', 'аудитория',
+        'room_number', 'room_id', 'локация', 'помещение', 'кабинет', 'аудитория',
         'location_place', 'место', 'местоположение',
         'dimensions', 'размеры', 'размеры (д*ш*в), см', 'размеры, см',
         'description', 'описание', 'краткое описание',
@@ -4380,11 +4659,9 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
       const cleanRoomKey = cleanRoomStr.trim().toLowerCase();
       const existing = roomMap.get(cleanRoomKey);
       if (existing) return existing;
-      const parsedNum = parseInt(cleanRoomStr.replace(/\D/g, ''), 10) || 1;
-      const floor = Math.max(1, Math.min(10, Math.floor(parsedNum / 100) || 1));
       const [newRoom] = await tx
         .insert(rooms)
-        .values({ number: cleanRoomStr.trim(), floor })
+        .values({ number: cleanRoomStr.trim(), floor: null, details: {} })
         .returning();
       roomMap.set(cleanRoomKey, newRoom.id);
       newRoomsCreated.push(cleanRoomStr.trim());

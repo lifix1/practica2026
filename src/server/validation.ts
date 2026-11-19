@@ -81,7 +81,7 @@ export const STANDARD_DEPARTMENT_FIELDS: Record<string, StandardFieldSpec> = {
     options: [
       'Рабочее',
       'Есть нюансы',
-      'Вышло из строя (ремонт возможен)',
+      'Вышло из строя',
       'Неремонтопригодно',
     ],
   },

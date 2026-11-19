@@ -52,11 +52,12 @@ export const refreshTokens = pgTable('refresh_token', {
   valid_until: timestamp('valid_until').notNull(),
 });
 
-// 4. Table "room"
+// 4. Table "room" (Локации)
 export const rooms = pgTable('room', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
   number: text('number').notNull(),
-  floor: integer('floor').notNull(),
+  floor: integer('floor'),
+  details: json('details').$type<Record<string, any>>().notNull().default({}),
 });
 
 // 5. Table "equipment_type"

@@ -6,10 +6,19 @@ export interface User {
   role: UserRole;
 }
 
+export interface RoomDetails {
+  description?: string;
+  dimensions?: string;
+  scheme?: string;
+  notes?: string;
+  [key: string]: any;
+}
+
 export interface Room {
   id: number;
   number: string;
-  floor: number;
+  floor: number | null;
+  details?: RoomDetails | null;
 }
 
 export interface EquipmentType {
@@ -49,7 +58,7 @@ export type EquipmentStatus = 'Действует' | 'На хранении' | s
 export type EquipmentCondition =
   | 'Рабочее'
   | 'Есть нюансы'
-  | 'Вышло из строя (ремонт возможен)'
+  | 'Вышло из строя'
   | 'Неремонтопригодно'
   | string;
 export type AccountingCategory =
@@ -96,6 +105,19 @@ export interface Equipment {
   writeoffState?: WriteoffState | null;
   writeoffDate?: string | null;
   qrCode?: string;
+  activeTransfer?: {
+    id: number;
+    issued_to: string;
+    issued_at: string;
+    expected_return_at?: string | null;
+  } | null;
+  activeIssues?: Array<{
+    id: number;
+    state: IssueState;
+    description: string;
+    broken_at: string;
+  }>;
+  highestIssueState?: IssueState | null;
 }
 
 export interface EquipmentIssue {

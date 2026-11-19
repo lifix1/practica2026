@@ -819,11 +819,9 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                   </h4>
                   <div className="grid grid-cols-2 gap-3 text-xs">
                     <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                      <span className="text-slate-500 block">Помещение / Аудитория</span>
+                      <span className="text-slate-500 block">Локация</span>
                       <span className="font-semibold text-slate-900 text-sm">
-                        {data.roomNumber
-                          ? `№ ${data.roomNumber}${data.roomFloor !== null && data.roomFloor !== undefined ? ` (${data.roomFloor} этаж)` : ''}`
-                          : 'Не указано'}
+                        {data.roomNumber || 'Не указана'}
                       </span>
                       {data.additional_fields?.location_place && (
                         <span className="text-[11px] text-slate-600 block mt-0.5">
@@ -832,7 +830,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                       )}
                     </div>
                     <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                      <span className="text-slate-500 block">Дата принятия к учету</span>
+                      <span className="text-slate-500 block">Дата начала эксплуатации</span>
                       <span className="font-semibold text-slate-900 text-sm">
                         {data.recived ? new Date(data.recived).toLocaleDateString('ru-RU') : 'Не указана'}
                       </span>
@@ -886,7 +884,9 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                   <div className="p-3 rounded-xl border border-slate-200 bg-white">
                     <span className="text-slate-500 block mb-0.5">Состояние</span>
                     <span className="font-semibold text-slate-900">
-                      {data.additional_fields?.condition || 'Рабочее'}
+                      {data.additional_fields?.condition === 'Вышло из строя (ремонт возможен)'
+                        ? 'Вышло из строя'
+                        : data.additional_fields?.condition || 'Рабочее'}
                     </span>
                   </div>
                   <div className="p-3 rounded-xl border border-slate-200 bg-white">
@@ -1447,7 +1447,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
               <div className="font-semibold text-slate-800">{data?.name}</div>
               <div className="text-slate-500 font-mono text-[11px] tabular-nums">
                 {data?.inventory_number ? `Инв. № ${data.inventory_number}` : `ID #${data?.id}`} •{' '}
-                {data?.roomNumber ? `Каб. ${data.roomNumber}` : 'Без помещения'} •{' '}
+                {data?.roomNumber ? data.roomNumber : 'Без локации'} •{' '}
                 {Number(data?.initial_cost || 0).toLocaleString('ru-RU', {
                   minimumFractionDigits: 2,
                   maximumFractionDigits: 2,

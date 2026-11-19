@@ -31,7 +31,7 @@ export const GroupQrModal: React.FC<GroupQrModalProps> = ({
   const [batchName, setBatchName] = useState(() => {
     if (selectedItems.length === 0) return '';
     const first = selectedItems[0];
-    const room = first.roomNumber ? ` (Ауд. ${first.roomNumber})` : '';
+    const room = first.roomNumber ? ` (${first.roomNumber})` : '';
     return `Комплект: ${selectedItems.length} шт. («${first.name}»)${room}`;
   });
 
@@ -164,7 +164,7 @@ export const GroupQrModal: React.FC<GroupQrModalProps> = ({
                 type="text"
                 value={batchName}
                 onChange={(e) => setBatchName(e.target.value)}
-                placeholder="Например: Партия 10 учебных столов, ауд. 308"
+                placeholder="Например: Партия 10 учебных столов, 308"
                 className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500"
                 required
               />
@@ -175,7 +175,7 @@ export const GroupQrModal: React.FC<GroupQrModalProps> = ({
               <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
                 <span>Выбранные предметы ({selectedItems.length} ед.):</span>
                 <span className="text-purple-700 font-mono text-[11px]">
-                  {selectedItems[0]?.roomNumber ? `Кабинет: ${selectedItems[0].roomNumber}` : ''}
+                  {selectedItems[0]?.roomNumber ? `Локация: ${selectedItems[0].roomNumber}` : ''}
                 </span>
               </div>
               <div className="max-h-36 overflow-y-auto space-y-1 pr-1">

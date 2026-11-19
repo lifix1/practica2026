@@ -270,7 +270,7 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
                     <tr>
                       <th className="p-2.5">Инв. №</th>
                       <th className="p-2.5">Наименование</th>
-                      <th className="p-2.5">Кабинет</th>
+                      <th className="p-2.5">Локация</th>
                       <th className="p-2.5 text-right">Действие</th>
                     </tr>
                   </thead>
@@ -284,7 +284,7 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
                           {item.name}
                         </td>
                         <td className="p-2.5 text-slate-600">
-                          {item.roomNumber ? `Ауд. ${item.roomNumber}` : '—'}
+                          {item.roomNumber || '—'}
                         </td>
                         <td className="p-2.5 text-right">
                           <button

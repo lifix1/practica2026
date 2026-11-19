@@ -104,7 +104,14 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-  const limit = 15;
+  const [pageSize, setPageSize] = useState<number>(() => {
+    try {
+      const saved = Number(localStorage.getItem('equipment_page_size'));
+      return [15, 25, 50, 100, 200].includes(saved) ? saved : 50;
+    } catch {
+      return 50;
+    }
+  });
 
   // Main filter states
   const [search, setSearch] = useState('');
@@ -231,7 +238,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
     setLoading(true);
     const params = new URLSearchParams();
     params.set('page', String(page));
-    params.set('limit', String(limit));
+    params.set('limit', String(pageSize));
     if (search.trim()) params.set('search', search.trim());
     if (selectedTypeId) params.set('type_id', selectedTypeId);
     if (selectedRoomId) params.set('room_id', selectedRoomId);
@@ -298,6 +305,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
     customFieldValue,
     customFieldMin,
     customFieldMax,
+    pageSize,
     refreshKey,
   ]);
 
@@ -689,7 +697,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
           {/* Room filter */}
           <div>
             <label className="block text-[11px] font-semibold text-slate-500 mb-1">
-              Помещение / Кабинет:
+              Локации:
             </label>
             <select
               value={selectedRoomId}
@@ -699,11 +707,11 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
               }}
               className="w-full p-2 border border-slate-200 rounded-xl bg-slate-50/50 outline-none"
             >
-              <option value="">Все помещения</option>
-              <option value="NONE">Без помещения</option>
+              <option value="">Все локации</option>
+              <option value="NONE">Без локации</option>
               {(Array.isArray(rooms) ? rooms : []).map((r) => (
                 <option key={r.id} value={r.id}>
-                  Ауд. {r.number} ({r.floor} этаж)
+                  {r.number}
                 </option>
               ))}
             </select>
@@ -766,7 +774,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
               <option value="">Любое состояние</option>
               <option value="Рабочее">Рабочее</option>
               <option value="Есть нюансы">Есть нюансы</option>
-              <option value="Вышло из строя">Вышло из строя (ремонт возможен)</option>
+              <option value="Вышло из строя">Вышло из строя</option>
               <option value="Неремонтопригодно">Неремонтопригодно</option>
             </select>
           </div>
@@ -1369,7 +1377,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                 <th className="p-3">Инв. номер</th>
                 <th className="p-3">Наименование и описание</th>
                 <th className="p-3">Тип / Бухучет</th>
-                <th className="p-3">Помещение / Место</th>
+                <th className="p-3">Локация / Место</th>
                 <th className="p-3">Габариты / Цвет</th>
                 <th className="p-3">Статус / Состояние</th>
                 <th className="p-3">Гарантия</th>
@@ -1419,16 +1427,37 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                   const isPreparingWriteoff = !isRegularUser && item.writeoffState === 'PREPARING';
                   const af = item.additional_fields || {};
                   const opStatus = af.status || 'Действует';
-                  const cond = af.condition || 'Рабочее';
+                  const cond =
+                    af.condition === 'Вышло из строя (ремонт возможен)'
+                      ? 'Вышло из строя'
+                      : af.condition || 'Рабочее';
                   const cat = af.accounting_category;
                   const underWarranty = Boolean(af.is_under_warranty);
 
+                  const activeTransfer = !isRegularUser ? item.activeTransfer || null : null;
+                  const activeIssues = Array.isArray(item.activeIssues) ? item.activeIssues : [];
+                  const highestIssueState =
+                    item.highestIssueState ||
+                    (activeIssues.some((iss) => iss.state === 'CRITICAL_ISSUE')
+                      ? 'CRITICAL_ISSUE'
+                      : activeIssues.some((iss) => iss.state === 'ISSUE')
+                      ? 'ISSUE'
+                      : activeIssues.length > 0
+                      ? 'WEAR_AND_TEAR'
+                      : null);
+                  const hasCriticalIssue = highestIssueState === 'CRITICAL_ISSUE';
+
+                  // Priority: WRITTEN_OFF -> DOCUMENTS_PREPARATION -> activeTransfer -> CRITICAL_ISSUE -> PREPARING
                   const rowTintClass = isSelected
                     ? 'bg-indigo-50/45 hover:bg-indigo-50/70'
                     : isWrittenOff
                     ? 'bg-slate-200/75 hover:bg-slate-200 text-slate-600'
                     : isDocsPrep
                     ? 'bg-[#f4e7cf] hover:bg-[#ecdabc]'
+                    : activeTransfer
+                    ? 'bg-[#e0f9fb] hover:bg-[#ccf4f8]'
+                    : hasCriticalIssue
+                    ? 'bg-[#fce7f9] hover:bg-[#f9d3f3]'
                     : isPreparingWriteoff
                     ? 'bg-[#fdf9ef] hover:bg-[#f7f0dc]'
                     : 'hover:bg-slate-50/80';
@@ -1512,16 +1541,32 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                       <td className="p-3">
                         {item.roomNumber ? (
                           <div className="font-semibold text-slate-800 whitespace-nowrap">
-                            ауд. {item.roomNumber}
+                            {item.roomNumber}
                           </div>
                         ) : (
                           <div className="text-slate-400 font-normal whitespace-nowrap">
-                            Без помещения
+                            Без локации
                           </div>
                         )}
                         {af.location_place && (
                           <div className="text-[11px] text-slate-500 max-w-[160px] truncate" title={af.location_place}>
                             {af.location_place}
+                          </div>
+                        )}
+                        {activeTransfer && (
+                          <div className="mt-1 space-y-0.5">
+                            <span
+                              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-cyan-100 text-cyan-900 border border-cyan-300 font-semibold text-[10px] max-w-[185px]"
+                              title={`Передано во временное пользование: ${activeTransfer.issued_to}`}
+                            >
+                              <ArrowRightLeft className="w-2.5 h-2.5 shrink-0" />
+                              <span className="truncate">Передано: {activeTransfer.issued_to}</span>
+                            </span>
+                            {activeTransfer.expected_return_at && (
+                              <div className="text-[10px] text-cyan-800 whitespace-nowrap">
+                                возврат до {formatDateRu(activeTransfer.expected_return_at)}
+                              </div>
+                            )}
                           </div>
                         )}
                       </td>
@@ -1578,6 +1623,34 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                           >
                             {cond}
                           </span>
+                          {activeIssues.length > 0 && (
+                            <div className="flex flex-col gap-0.5 items-start mt-0.5">
+                              <span
+                                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-semibold text-[10px] border ${
+                                  highestIssueState === 'CRITICAL_ISSUE'
+                                    ? 'bg-fuchsia-100 text-fuchsia-900 border-fuchsia-300'
+                                    : highestIssueState === 'ISSUE'
+                                    ? 'bg-amber-100 text-amber-900 border-amber-300'
+                                    : 'bg-orange-100 text-orange-900 border-orange-300'
+                                }`}
+                                title={activeIssues.map((i) => i.description).join('; ')}
+                              >
+                                <AlertCircle className="w-2.5 h-2.5 shrink-0" />
+                                {highestIssueState === 'CRITICAL_ISSUE'
+                                  ? 'Критическая поломка'
+                                  : highestIssueState === 'ISSUE'
+                                  ? 'Поломка'
+                                  : 'Износ'}
+                                {activeIssues.length > 1 ? ` (${activeIssues.length})` : ''}
+                              </span>
+                              <span
+                                className="text-[10px] text-slate-600 max-w-[165px] truncate"
+                                title={activeIssues[0].description}
+                              >
+                                {activeIssues[0].description}
+                              </span>
+                            </div>
+                          )}
                         </div>
                       </td>
                       <td className="p-3 whitespace-nowrap">
@@ -1648,10 +1721,60 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
           </table>
         </div>
 
-        {/* Pagination Bar */}
-        <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500">
-          <div>
-            Показано {items.length} из {total} единиц оборудования
+        {/* Color Legend & Pagination Bar */}
+        {!isRegularUser && (
+          <div className="px-3 py-2 bg-slate-50/70 border-t border-slate-200 flex flex-wrap items-center gap-3 text-[10px] font-medium text-slate-600">
+            <span className="text-slate-400 font-semibold uppercase tracking-wider">Цвета строк:</span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded bg-[#f4e7cf] border border-[#d7be92]" />
+              Проходит процедуру списания
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded bg-[#e0f9fb] border border-cyan-300" />
+              Передано
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded bg-[#fce7f9] border border-fuchsia-300" />
+              Критическая поломка
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded bg-[#fdf9ef] border border-[#e6d6b1]" />
+              Выбрано для списания
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded bg-slate-200 border border-slate-300" />
+              Списано
+            </span>
+          </div>
+        )}
+        <div className="p-3 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+          <div className="flex flex-wrap items-center gap-3">
+            <span>
+              Показано {items.length} из {total} единиц оборудования
+            </span>
+            <label className="inline-flex items-center gap-1.5 text-slate-600">
+              <span>На странице:</span>
+              <select
+                value={pageSize}
+                onChange={(e) => {
+                  const next = Number(e.target.value);
+                  setPageSize(next);
+                  setPage(1);
+                  try {
+                    localStorage.setItem('equipment_page_size', String(next));
+                  } catch {
+                    // ignore storage errors
+                  }
+                }}
+                className="px-2 py-1 border border-slate-200 rounded-lg bg-white text-slate-700 font-semibold outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value={15}>15</option>
+                <option value={25}>25</option>
+                <option value={50}>50</option>
+                <option value={100}>100</option>
+                <option value={200}>200</option>
+              </select>
+            </label>
           </div>
           <div className="flex items-center gap-2">
             <button

@@ -430,6 +430,7 @@ export default function App() {
           setEditEquipmentData(null);
         }}
         onSuccess={() => setRefreshKey((k) => k + 1)}
+        onRefreshRooms={fetchRooms}
         initialData={editEquipmentData}
         rooms={rooms}
         types={types}

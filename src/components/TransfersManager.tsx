@@ -113,7 +113,7 @@ export const TransfersManager: React.FC<TransfersManagerProps> = ({
                       {item.name}
                     </button>
                     <div className="text-[11px] text-slate-500 mt-0.5">
-                      {item.typeName || 'Без типа'} • Базовая аудитория: {item.roomNumber ? `№ ${item.roomNumber}` : 'не указана'}
+                      {item.typeName || 'Без типа'} • Локация: {item.roomNumber || 'не указана'}
                     </div>
                   </div>
                 </div>

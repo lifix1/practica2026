@@ -1156,7 +1156,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                       </div>
                       <div className="text-[11px] text-slate-500 mt-0.5 flex flex-wrap gap-x-2 gap-y-0.5">
                         <span>{item.typeName || 'Без типа'}</span>
-                        <span>• {item.roomNumber ? `Каб. ${item.roomNumber}` : 'Без помещения'}</span>
+                        <span>• {item.roomNumber || 'Без локации'}</span>
                         <span>
                           • Ввод: {item.recived ? new Date(item.recived).toLocaleDateString('ru-RU') : 'не указана'} (срок на{' '}
                           {docDate ? new Date(`${docDate}T00:00:00`).toLocaleDateString('ru-RU') : 'сегодня'}:{' '}

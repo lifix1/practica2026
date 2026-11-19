@@ -496,7 +496,7 @@ export async function generateQrDocx(
             spacing: { before: imageSpacing, after: 0 },
             children: [
               new TextRun({
-                text: `Тип: ${item.typeName || 'Без типа'}${item.roomNumber ? ` | Каб. ${item.roomNumber}` : ''}`,
+                text: `Тип: ${item.typeName || 'Без типа'}${item.roomNumber ? ` | ${item.roomNumber}` : ''}`,
                 size: metaFontSize,
                 color: '64748B',
               }),
@@ -1857,7 +1857,7 @@ export async function generateGroupQrDocx(
           width: { size: 3600, type: WidthType.DXA },
         }),
         new TableCell({
-          children: [new Paragraph({ children: [new TextRun({ text: 'Кабинет', bold: true })] })],
+          children: [new Paragraph({ children: [new TextRun({ text: 'Локация', bold: true })] })],
           width: { size: 1200, type: WidthType.DXA },
         }),
         new TableCell({

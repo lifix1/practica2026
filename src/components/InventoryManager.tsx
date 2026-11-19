@@ -295,7 +295,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                 {(() => {
                   const grouped = new Map<string, any[]>();
                   for (const item of unverifiedItems) {
-                    const roomKey = String(item.roomNumber || 'Без кабинета');
+                    const roomKey = String(item.roomNumber || 'Без локации');
                     const arr = grouped.get(roomKey) || [];
                     arr.push(item);
                     grouped.set(roomKey, arr);
@@ -305,7 +305,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                       <div className="px-4 py-2 bg-slate-50/80 border-b border-slate-100 flex items-center justify-between text-xs">
                         <span className="font-bold text-slate-700 inline-flex items-center gap-1.5">
                           <DoorOpen className="w-3.5 h-3.5 text-indigo-600" />
-                          Аудитория № {roomNum}
+                          {roomNum}
                         </span>
                         <span className="text-[11px] font-semibold text-slate-500 tabular-nums">
                           Осталось: {roomItems.length} ед.
@@ -329,7 +329,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                                   {item.name}
                                 </button>
                                 <div className="text-[11px] text-slate-500 mt-0.5">
-                                  {item.typeName || 'Без типа'} • {item.roomNumber ? `Ауд. ${item.roomNumber}` : 'Без помещения'}
+                                  {item.typeName || 'Без типа'} • {item.roomNumber || 'Без локации'}
                                 </div>
                               </div>
                             </div>

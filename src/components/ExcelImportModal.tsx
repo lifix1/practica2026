@@ -470,7 +470,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
               </div>
               {Array.isArray(importResult.createdRooms) && importResult.createdRooms.length > 0 && (
                 <div className="text-[11px] text-emerald-800 pl-6">
-                  Автоматически добавлены новые помещения: {importResult.createdRooms.join(', ')}
+                  Автоматически добавлены новые локации: {importResult.createdRooms.join(', ')}
                 </div>
               )}
               {Array.isArray(importResult.createdTypes) && importResult.createdTypes.length > 0 && (
@@ -507,7 +507,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                       <th className="p-2 font-semibold">ID в БД</th>
                       <th className="p-2 font-semibold">Инв. номер</th>
                       <th className="p-2 font-semibold">Наименование (файл / база)</th>
-                      <th className="p-2 font-semibold">Помещение</th>
+                      <th className="p-2 font-semibold">Локация</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-amber-100">
@@ -529,7 +529,7 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
                           )}
                         </td>
                         <td className="p-2 text-slate-600 whitespace-nowrap">
-                          {dup.existingRoom && dup.existingRoom !== '—' ? `ауд. ${dup.existingRoom}` : 'Без помещения'}
+                          {dup.existingRoom && dup.existingRoom !== '—' ? dup.existingRoom : 'Без локации'}
                         </td>
                       </tr>
                     ))}

@@ -55,8 +55,16 @@ export async function ensureTablesExist() {
       CREATE TABLE IF NOT EXISTS room (
         id BIGSERIAL PRIMARY KEY,
         number TEXT NOT NULL,
-        floor INTEGER NOT NULL
+        floor INTEGER,
+        details JSON NOT NULL DEFAULT '{}'
       );
+    `);
+
+    await db.execute(sql`
+      DO $$ BEGIN
+        ALTER TABLE room ALTER COLUMN floor DROP NOT NULL;
+        ALTER TABLE room ADD COLUMN IF NOT EXISTS details JSON NOT NULL DEFAULT '{}';
+      EXCEPTION WHEN OTHERS THEN null; END $$;
     `);
 
     await db.execute(sql`
@@ -245,6 +253,17 @@ export async function ensureTablesExist() {
         updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
         updated_by TEXT
       );
+    `);
+
+    await db.execute(sql`
+      UPDATE equipment
+      SET additional_fields = jsonb_set(
+        additional_fields::jsonb,
+        '{condition}',
+        '"Вышло из строя"'::jsonb
+      )::json
+      WHERE additional_fields IS NOT NULL
+        AND additional_fields::jsonb->>'condition' = 'Вышло из строя (ремонт возможен)';
     `);
   } catch (err: any) {
     console.log('ensureTablesExist notice:', err?.message || err);

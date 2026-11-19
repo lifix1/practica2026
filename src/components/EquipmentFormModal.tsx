@@ -1,5 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { X, Plus, Trash2, AlertCircle, Save, ShieldCheck, ShieldAlert } from 'lucide-react';
+import {
+  X,
+  Plus,
+  Trash2,
+  AlertCircle,
+  Save,
+  ShieldCheck,
+  ShieldAlert,
+  ChevronDown,
+  MapPin,
+} from 'lucide-react';
 import type { Room, EquipmentType, AdditionalField } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
 import { flattenTypeTree } from '../utils/typeTree.ts';
@@ -8,6 +18,7 @@ interface EquipmentFormModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSuccess: () => void;
+  onRefreshRooms?: () => void;
   initialData?: any | null;
   rooms: Room[];
   types: EquipmentType[];
@@ -29,6 +40,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
   isOpen,
   onClose,
   onSuccess,
+  onRefreshRooms,
   initialData,
   rooms,
   types,
@@ -37,6 +49,8 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
   const [name, setName] = useState('');
   const [typeId, setTypeId] = useState<number | ''>('');
   const [roomId, setRoomId] = useState<number | ''>('');
+  const [roomInput, setRoomInput] = useState('');
+  const [roomDropdownOpen, setRoomDropdownOpen] = useState(false);
   const [recived, setRecived] = useState('');
   const [initialCost, setInitialCost] = useState<number | ''>('');
   const [residualCost, setResidualCost] = useState<number | ''>('');
@@ -46,6 +60,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const formRef = useRef<HTMLFormElement>(null);
+  const roomComboboxRef = useRef<HTMLDivElement>(null);
   const previousDynamicCodesRef = useRef<string[]>([]);
 
   const showErrors = (list: string[]) => {
@@ -55,15 +70,33 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
     });
   };
 
+  // Close location dropdown on outside click
+  useEffect(() => {
+    if (!roomDropdownOpen) return;
+    const handleOutside = (ev: MouseEvent) => {
+      if (roomComboboxRef.current && !roomComboboxRef.current.contains(ev.target as Node)) {
+        setRoomDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [roomDropdownOpen]);
+
   // Initialize or reset form
   useEffect(() => {
     if (!isOpen) return;
     previousDynamicCodesRef.current = [];
+    setRoomDropdownOpen(false);
     if (initialData) {
       setInventoryNumber(initialData.inventory_number || '');
       setName(initialData.name || '');
       setTypeId(initialData.type_id || '');
-      setRoomId(initialData.room_id || '');
+      const initRoomId = initialData.room_id || '';
+      setRoomId(initRoomId);
+      const matchedRoom = (Array.isArray(rooms) ? rooms : []).find(
+        (r) => Number(r.id) === Number(initRoomId)
+      );
+      setRoomInput(matchedRoom?.number || initialData.roomNumber || '');
       setRecived(toInputDate(initialData.recived));
       setInitialCost(
         initialData.initial_cost !== null && initialData.initial_cost !== undefined
@@ -76,10 +109,13 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
           : ''
       );
       const af = initialData.additional_fields || {};
+      const normalizedCondition =
+        af.condition === 'Вышло из строя (ремонт возможен)' ? 'Вышло из строя' : af.condition;
       setAdditionalFieldsValues({
         status: 'Действует',
         condition: 'Рабочее',
         ...af,
+        ...(normalizedCondition ? { condition: normalizedCondition } : {}),
         accounting_category: af.accounting_category || 'Без категории',
         precious_metals: typeof af.precious_metals === 'boolean' ? af.precious_metals : false,
       });
@@ -88,6 +124,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
       setName('');
       setTypeId('');
       setRoomId('');
+      setRoomInput('');
       setRecived('');
       setInitialCost('');
       setResidualCost('');
@@ -194,7 +231,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
       validationErrors.push('Укажите наименование (по бухгалтерии).');
     }
     if (recived.trim() && isNaN(new Date(recived).getTime())) {
-      validationErrors.push('Укажите корректную дату принятия к учёту.');
+      validationErrors.push('Укажите корректную дату начала эксплуатации.');
     }
     if (initialCost !== '' && (isNaN(Number(initialCost)) || Number(initialCost) < 0)) {
       validationErrors.push('Первоначальная стоимость не может быть отрицательной.');
@@ -261,11 +298,28 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
 
     const payloadFields = cleanedFields;
 
+    const safeRooms = Array.isArray(rooms) ? rooms : [];
+    const trimmedRoomText = roomInput.trim();
+    const matchedExistingRoom = trimmedRoomText
+      ? safeRooms.find((r) => r.number.trim().toLowerCase() === trimmedRoomText.toLowerCase())
+      : undefined;
+
+    const resolvedRoomId = matchedExistingRoom
+      ? Number(matchedExistingRoom.id)
+      : !trimmedRoomText
+      ? null
+      : roomId
+      ? Number(roomId)
+      : null;
+    const newRoomName =
+      trimmedRoomText && !matchedExistingRoom ? trimmedRoomText : null;
+
     const payload = {
       inventory_number: inventoryNumber.trim() || null,
       name: name.trim(),
       type_id: typeId ? Number(typeId) : null,
-      room_id: roomId ? Number(roomId) : null,
+      room_id: newRoomName ? null : resolvedRoomId,
+      new_room_name: newRoomName,
       recived: recived.trim() ? new Date(recived).toISOString() : null,
       initial_cost: initialCost === '' ? 0 : Number(initialCost),
       residual_cost: residualCost === '' ? null : Number(residualCost),
@@ -305,6 +359,9 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
         throw new Error(resData.error || 'Не удалось сохранить оборудование. Проверьте введённые данные.');
       }
 
+      if (newRoomName && onRefreshRooms) {
+        onRefreshRooms();
+      }
       onSuccess();
       onClose();
     } catch (err: any) {
@@ -418,27 +475,146 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
               />
             </div>
 
-            <div>
+            <div ref={roomComboboxRef} className="relative">
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Помещение / Аудитория
+                Локация
               </label>
-              <select
-                value={roomId}
-                onChange={(e) => setRoomId(e.target.value === '' ? '' : Number(e.target.value))}
-                className="w-full text-xs p-2.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none bg-white"
-              >
-                <option value="">Не указано (без помещения)</option>
-                {(Array.isArray(rooms) ? rooms : []).map((r) => (
-                  <option key={r.id} value={r.id}>
-                    Ауд. {r.number} ({r.floor} этаж)
-                  </option>
-                ))}
-              </select>
+              {(() => {
+                const safeRooms = Array.isArray(rooms) ? rooms : [];
+                const query = roomInput.trim().toLowerCase();
+                const exactMatch = query
+                  ? safeRooms.find((r) => r.number.trim().toLowerCase() === query)
+                  : undefined;
+                const filteredRooms = query
+                  ? safeRooms.filter((r) => r.number.toLowerCase().includes(query))
+                  : safeRooms;
+                const isNewLocationTyped = Boolean(roomInput.trim() && !exactMatch);
+
+                return (
+                  <>
+                    <div className="relative flex items-center">
+                      <input
+                        type="text"
+                        value={roomInput}
+                        onFocus={() => setRoomDropdownOpen(true)}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setRoomInput(val);
+                          const match = safeRooms.find(
+                            (r) => r.number.trim().toLowerCase() === val.trim().toLowerCase()
+                          );
+                          setRoomId(match ? Number(match.id) : '');
+                          setRoomDropdownOpen(true);
+                        }}
+                        placeholder="Выберите или введите новую локацию (302, Планетарий...)"
+                        className="w-full text-xs p-2.5 pr-14 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none bg-white"
+                      />
+                      <div className="absolute right-1.5 flex items-center gap-0.5">
+                        {roomInput && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRoomInput('');
+                              setRoomId('');
+                              setRoomDropdownOpen(false);
+                            }}
+                            title="Очистить локацию"
+                            className="p-1 text-slate-400 hover:text-red-600 rounded-lg"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setRoomDropdownOpen((prev) => !prev)}
+                          title="Показать список локаций"
+                          className="p-1 text-slate-400 hover:text-slate-700 rounded-lg"
+                        >
+                          <ChevronDown
+                            className={`w-4 h-4 transition-transform ${
+                              roomDropdownOpen ? 'rotate-180' : ''
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    </div>
+
+                    {isNewLocationTyped && !roomDropdownOpen && (
+                      <p className="text-[11px] text-blue-600 mt-1 flex items-center gap-1">
+                        <Plus className="w-3 h-3 shrink-0" />
+                        <span>
+                          Новая локация «{roomInput.trim()}» будет добавлена в справочник при сохранении
+                        </span>
+                      </p>
+                    )}
+
+                    {roomDropdownOpen && (
+                      <div className="absolute z-30 left-0 right-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg max-h-52 overflow-y-auto py-1 text-xs">
+                        {isNewLocationTyped && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setRoomId('');
+                              setRoomInput(roomInput.trim());
+                              setRoomDropdownOpen(false);
+                            }}
+                            className="w-full text-left px-3 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 font-semibold flex items-center gap-1.5 border-b border-blue-100"
+                          >
+                            <Plus className="w-3.5 h-3.5 shrink-0" />
+                            <span>Создать локацию «{roomInput.trim()}»</span>
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRoomId('');
+                            setRoomInput('');
+                            setRoomDropdownOpen(false);
+                          }}
+                          className={`w-full text-left px-3 py-2 hover:bg-slate-50 text-slate-500 ${
+                            !roomInput.trim() && !roomId ? 'bg-slate-100 font-semibold text-slate-800' : ''
+                          }`}
+                        >
+                          Не указана (без локации)
+                        </button>
+
+                        {filteredRooms.map((r) => {
+                          const isCurrent = Number(roomId) === Number(r.id);
+                          return (
+                            <button
+                              type="button"
+                              key={r.id}
+                              onClick={() => {
+                                setRoomId(Number(r.id));
+                                setRoomInput(r.number);
+                                setRoomDropdownOpen(false);
+                              }}
+                              className={`w-full text-left px-3 py-2 hover:bg-blue-50 flex items-center gap-2 ${
+                                isCurrent ? 'bg-blue-50 text-blue-700 font-semibold' : 'text-slate-800'
+                              }`}
+                            >
+                              <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                              <span className="truncate">{r.number}</span>
+                            </button>
+                          );
+                        })}
+
+                        {filteredRooms.length === 0 && !isNewLocationTyped && (
+                          <div className="px-3 py-2 text-slate-400 text-[11px]">
+                            Список локаций пуст — введите название выше
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Дата принятия к учету
+                Дата начала эксплуатации
               </label>
               <div className="flex items-center gap-1.5">
                 <input
@@ -452,7 +628,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
                     type="button"
                     onClick={() => setRecived('')}
                     className="px-2.5 py-2.5 text-xs text-slate-500 hover:text-red-600 hover:bg-red-50 border border-slate-200 rounded-xl transition-colors"
-                    title="Очистить дату принятия к учету"
+                    title="Очистить дату начала эксплуатации"
                   >
                     <X className="w-3.5 h-3.5" />
                   </button>
@@ -563,7 +739,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
                 >
                   <option value="Рабочее">Рабочее</option>
                   <option value="Есть нюансы">Есть нюансы</option>
-                  <option value="Вышло из строя (ремонт возможен)">Вышло из строя (ремонт возможен)</option>
+                  <option value="Вышло из строя">Вышло из строя</option>
                   <option value="Неремонтопригодно">Неремонтопригодно</option>
                 </select>
               </div>

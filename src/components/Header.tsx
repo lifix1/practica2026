@@ -78,7 +78,7 @@ export const Header: React.FC<HeaderProps> = ({
         { id: 'types', label: 'Типы и поля', icon: Layers },
         { id: 'transfers', label: 'Временное пользование', icon: Clock },
         ...(isAdmin ? [{ id: 'writeoffs', label: 'Списание', icon: FileSpreadsheet }] : []),
-        { id: 'rooms', label: 'Кабинеты', icon: DoorOpen },
+        { id: 'rooms', label: 'Локации', icon: DoorOpen },
         { id: 'logs', label: 'Журнал', icon: ScrollText },
         ...(isAdmin ? [{ id: 'users', label: 'Пользователи', icon: Users }] : []),
       ]
