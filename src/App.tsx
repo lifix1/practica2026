@@ -31,6 +31,7 @@ export default function App() {
 
   // Modals state
   const [selectedEquipmentId, setSelectedEquipmentId] = useState<number | null>(null);
+  const [selectedEquipmentQrToken, setSelectedEquipmentQrToken] = useState<string | null>(null);
   const [editEquipmentData, setEditEquipmentData] = useState<any | null>(null);
   const [showFormModal, setShowFormModal] = useState(false);
   const [showExcelModal, setShowExcelModal] = useState(false);
@@ -39,6 +40,7 @@ export default function App() {
   const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
   const [selectedGroupCode, setSelectedGroupCode] = useState<string | null>(null);
+  const [selectedGroupQrToken, setSelectedGroupQrToken] = useState<string | null>(null);
   const [pendingQrCode, setPendingQrCode] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
@@ -121,15 +123,20 @@ export default function App() {
 
     // Parse deep links (applied once user authenticates)
     const urlParams = new URLSearchParams(window.location.search);
+    const qrTokenParam = urlParams.get('qr_token');
     const openEqParam = urlParams.get('openEquipment');
     if (openEqParam) {
       const num = Number(openEqParam);
-      if (!isNaN(num) && num > 0) setSelectedEquipmentId(num);
+      if (!isNaN(num) && num > 0) {
+        setSelectedEquipmentId(num);
+        if (qrTokenParam) setSelectedEquipmentQrToken(qrTokenParam);
+      }
     }
 
     const openGrpParam = urlParams.get('openGroup');
     if (openGrpParam) {
       setSelectedGroupCode(openGrpParam);
+      if (qrTokenParam) setSelectedGroupQrToken(qrTokenParam);
     }
 
     const fromQrParam = urlParams.get('from_qr');
@@ -168,8 +175,10 @@ export default function App() {
         .then((resolved) => {
           if (cancelled || !resolved) return;
           if (resolved.kind === 'group' && resolved.code) {
+            setSelectedGroupQrToken(resolved.qrToken || code);
             setSelectedGroupCode(resolved.code);
           } else if (resolved.kind === 'equipment' && resolved.id) {
+            setSelectedEquipmentQrToken(resolved.qrToken || code);
             setSelectedEquipmentId(Number(resolved.id));
           }
           const url = new URL(window.location.href);
@@ -186,19 +195,33 @@ export default function App() {
   }, [currentUser, pendingQrCode]);
 
   useEffect(() => {
-    if (currentUser) {
-      fetchRooms();
-      fetchTypes();
-      refreshAuditState();
-      refreshNotifications();
+    if (!currentUser) return;
+    const isStaff = ['ADMIN', 'ENGINEER'].includes(currentUser.role);
 
-      const timer = setInterval(() => {
-        refreshNotifications();
-        refreshAuditState();
-      }, 30000);
-      return () => clearInterval(timer);
+    if (!isStaff) {
+      setActiveTab('equipment');
+      setRooms([]);
+      setTypes([]);
+      setNotifications([]);
+      setHasActiveAudit(false);
+      return;
     }
-  }, [currentUser, fetchRooms, fetchTypes, refreshAuditState, refreshNotifications]);
+
+    if (currentUser.role !== 'ADMIN' && ['writeoffs', 'users'].includes(activeTab)) {
+      setActiveTab('equipment');
+    }
+
+    fetchRooms();
+    fetchTypes();
+    refreshAuditState();
+    refreshNotifications();
+
+    const timer = setInterval(() => {
+      refreshNotifications();
+      refreshAuditState();
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [currentUser, activeTab, fetchRooms, fetchTypes, refreshAuditState, refreshNotifications]);
 
   // Handle Logout
   const handleLogout = async () => {
@@ -295,32 +318,42 @@ export default function App() {
 
       {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {activeTab === 'equipment' && (
+        {(activeTab === 'equipment' || !['ADMIN', 'ENGINEER'].includes(currentUser.role)) && (
           <EquipmentList
             currentUser={currentUser}
-            onOpenEquipmentDetail={(id) => setSelectedEquipmentId(id)}
+            onOpenEquipmentDetail={(id) => {
+              setSelectedEquipmentQrToken(null);
+              setSelectedEquipmentId(id);
+            }}
             onOpenCreateEquipment={() => {
               setEditEquipmentData(null);
               setShowFormModal(true);
             }}
             onOpenExcelImport={() => setShowExcelModal(true)}
-            onOpenGroupDetail={(code) => setSelectedGroupCode(code)}
+            onOpenGroupDetail={(code) => {
+              setSelectedGroupQrToken(null);
+              setSelectedGroupCode(code);
+            }}
+            onOpenQrScanner={() => setShowQrScannerModal(true)}
             rooms={rooms}
             types={types}
             refreshKey={refreshKey}
           />
         )}
 
-        {activeTab === 'inventory' && (
+        {activeTab === 'inventory' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
           <InventoryManager
             currentUser={currentUser}
-            onOpenEquipmentDetail={(id) => setSelectedEquipmentId(id)}
+            onOpenEquipmentDetail={(id) => {
+              setSelectedEquipmentQrToken(null);
+              setSelectedEquipmentId(id);
+            }}
             onRefreshGlobalAuditState={refreshAuditState}
             onOpenQrScanner={() => setShowQrScannerModal(true)}
           />
         )}
 
-        {activeTab === 'types' && (
+        {activeTab === 'types' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
           <TypesManager
             currentUser={currentUser}
             types={types}
@@ -328,21 +361,27 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'transfers' && (
+        {activeTab === 'transfers' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
           <TransfersManager
             currentUser={currentUser}
-            onOpenEquipmentDetail={(id) => setSelectedEquipmentId(id)}
+            onOpenEquipmentDetail={(id) => {
+              setSelectedEquipmentQrToken(null);
+              setSelectedEquipmentId(id);
+            }}
           />
         )}
 
-        {activeTab === 'writeoffs' && (
+        {activeTab === 'writeoffs' && currentUser.role === 'ADMIN' && (
           <WriteoffsManager
             currentUser={currentUser}
-            onOpenEquipmentDetail={(id) => setSelectedEquipmentId(id)}
+            onOpenEquipmentDetail={(id) => {
+              setSelectedEquipmentQrToken(null);
+              setSelectedEquipmentId(id);
+            }}
           />
         )}
 
-        {activeTab === 'rooms' && (
+        {activeTab === 'rooms' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
           <RoomsManager
             currentUser={currentUser}
             rooms={rooms}
@@ -350,12 +389,17 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'users' && <UsersManager currentUser={currentUser} />}
+        {activeTab === 'users' && currentUser.role === 'ADMIN' && (
+          <UsersManager currentUser={currentUser} />
+        )}
 
-        {activeTab === 'logs' && (
+        {activeTab === 'logs' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
           <AuditLogsManager
             currentUser={currentUser}
-            onOpenEquipmentDetail={(id) => setSelectedEquipmentId(id)}
+            onOpenEquipmentDetail={(id) => {
+              setSelectedEquipmentQrToken(null);
+              setSelectedEquipmentId(id);
+            }}
           />
         )}
       </main>
@@ -363,8 +407,12 @@ export default function App() {
       {/* Equipment Personal Passport Modal */}
       <EquipmentDetailModal
         equipmentId={selectedEquipmentId}
+        qrToken={selectedEquipmentQrToken}
         currentUser={currentUser}
-        onClose={() => setSelectedEquipmentId(null)}
+        onClose={() => {
+          setSelectedEquipmentId(null);
+          setSelectedEquipmentQrToken(null);
+        }}
         onEditEquipment={(data) => {
           setEditEquipmentData(data);
           setShowFormModal(true);
@@ -402,16 +450,30 @@ export default function App() {
       {/* QR Scanner Modal */}
       <QrScannerModal
         isOpen={showQrScannerModal}
+        currentUser={currentUser}
         onClose={() => setShowQrScannerModal(false)}
-        onSelectEquipmentId={(id) => setSelectedEquipmentId(id)}
-        onSelectGroupCode={(code) => setSelectedGroupCode(code)}
+        onSelectEquipmentId={(id, qrToken) => {
+          setSelectedEquipmentQrToken(qrToken || null);
+          setSelectedEquipmentId(id);
+        }}
+        onSelectGroupCode={(code, qrToken) => {
+          setSelectedGroupQrToken(qrToken || null);
+          setSelectedGroupCode(code);
+        }}
       />
 
       {/* Group Detail Modal */}
       <GroupDetailModal
         groupCode={selectedGroupCode}
-        onClose={() => setSelectedGroupCode(null)}
-        onOpenEquipmentDetail={(id) => setSelectedEquipmentId(id)}
+        qrToken={selectedGroupQrToken}
+        onClose={() => {
+          setSelectedGroupCode(null);
+          setSelectedGroupQrToken(null);
+        }}
+        onOpenEquipmentDetail={(id, qrToken) => {
+          setSelectedEquipmentQrToken(qrToken || null);
+          setSelectedEquipmentId(id);
+        }}
         currentUser={currentUser}
         onReloadList={refreshNotifications}
       />
@@ -422,7 +484,10 @@ export default function App() {
         onClose={() => setShowNotifications(false)}
         notifications={notifications}
         onDismiss={handleDismissNotification}
-        onOpenEquipmentDetail={(id) => setSelectedEquipmentId(id)}
+        onOpenEquipmentDetail={(id) => {
+          setSelectedEquipmentQrToken(null);
+          setSelectedEquipmentId(id);
+        }}
       />
 
       {/* Re-Login Modal */}
@@ -431,10 +496,12 @@ export default function App() {
         onClose={() => setShowLoginModal(false)}
         onSuccess={(user) => {
           setCurrentUser(user);
-          refreshAuditState();
-          refreshNotifications();
-          fetchRooms();
-          fetchTypes();
+          if (['ADMIN', 'ENGINEER'].includes(user.role)) {
+            refreshAuditState();
+            refreshNotifications();
+            fetchRooms();
+            fetchTypes();
+          }
         }}
       />
 

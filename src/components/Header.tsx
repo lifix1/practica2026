@@ -65,28 +65,24 @@ export const Header: React.FC<HeaderProps> = ({
     }
   };
 
-  const navItems = [
-    { id: 'equipment', label: 'Оборудование', icon: Boxes },
-    ...(currentUser && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && hasActiveAudit
-      ? [{ id: 'inventory', label: 'Текущая инвентаризация', icon: ClipboardCheck, alert: true }]
-      : currentUser && ['ADMIN', 'ENGINEER'].includes(currentUser.role)
-      ? [{ id: 'inventory', label: 'Инвентаризация', icon: ClipboardCheck }]
-      : []),
-    { id: 'types', label: 'Типы и поля', icon: Layers },
-    ...(currentUser && ['ADMIN', 'ENGINEER'].includes(currentUser.role)
-      ? [
-          { id: 'transfers', label: 'Временное пользование', icon: Clock },
-          { id: 'writeoffs', label: 'Списание', icon: FileSpreadsheet },
-        ]
-      : []),
-    { id: 'rooms', label: 'Кабинеты', icon: DoorOpen },
-    ...(currentUser
-      ? [{ id: 'logs', label: 'Журнал', icon: ScrollText }]
-      : []),
-    ...(currentUser?.role === 'ADMIN'
-      ? [{ id: 'users', label: 'Пользователи', icon: Users }]
-      : []),
-  ];
+  const isAdmin = currentUser?.role === 'ADMIN';
+  const isEngineer = currentUser?.role === 'ENGINEER';
+  const isStaff = isAdmin || isEngineer;
+
+  const navItems = isStaff
+    ? [
+        { id: 'equipment', label: 'Оборудование', icon: Boxes },
+        ...(hasActiveAudit
+          ? [{ id: 'inventory', label: 'Текущая инвентаризация', icon: ClipboardCheck, alert: true }]
+          : [{ id: 'inventory', label: 'Инвентаризация', icon: ClipboardCheck }]),
+        { id: 'types', label: 'Типы и поля', icon: Layers },
+        { id: 'transfers', label: 'Временное пользование', icon: Clock },
+        ...(isAdmin ? [{ id: 'writeoffs', label: 'Списание', icon: FileSpreadsheet }] : []),
+        { id: 'rooms', label: 'Кабинеты', icon: DoorOpen },
+        { id: 'logs', label: 'Журнал', icon: ScrollText },
+        ...(isAdmin ? [{ id: 'users', label: 'Пользователи', icon: Users }] : []),
+      ]
+    : [{ id: 'equipment', label: 'Моё оборудование', icon: Boxes }];
 
   return (
     <header className="bg-white border-b border-slate-200 sticky top-0 z-30 shadow-xs">

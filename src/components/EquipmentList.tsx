@@ -35,6 +35,7 @@ interface EquipmentListProps {
   onOpenCreateEquipment: () => void;
   onOpenExcelImport: () => void;
   onOpenGroupDetail?: (code: string) => void;
+  onOpenQrScanner?: () => void;
   rooms: Room[];
   types: EquipmentType[];
   refreshKey?: number;
@@ -65,12 +66,35 @@ const formatDateRu = (val?: string | null) => {
   return isNaN(d.getTime()) ? String(val) : d.toLocaleDateString('ru-RU');
 };
 
+const hasInventoryNumber = (item: Pick<Equipment, 'inventory_number'>) =>
+  Boolean(item.inventory_number && String(item.inventory_number).trim());
+
+const isPreciousTrue = (val: unknown) => {
+  if (val === true || val === 1) return true;
+  if (typeof val === 'string') {
+    const s = val.trim().toLowerCase();
+    return s === 'true' || s === '1' || s === 'да' || s === 'yes';
+  }
+  return false;
+};
+
+const detectClientWriteoffCase = (item: Equipment): 'case1' | 'case2' | 'case3' | null => {
+  if (!hasInventoryNumber(item)) return null;
+  const cat = String(item.additional_fields?.accounting_category || '').toLowerCase();
+  const hasDm = isPreciousTrue(item.additional_fields?.precious_metals);
+  if (cat.includes('малоцен') && hasDm) return 'case2';
+  if (cat.includes('малоцен') && !hasDm) return 'case3';
+  if (cat.includes('дорогостоящ') && hasDm) return 'case1';
+  return null;
+};
+
 export const EquipmentList: React.FC<EquipmentListProps> = ({
   currentUser,
   onOpenEquipmentDetail,
   onOpenCreateEquipment,
   onOpenExcelImport,
   onOpenGroupDetail,
+  onOpenQrScanner,
   rooms,
   types,
   refreshKey = 0,
@@ -132,6 +156,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [transferIssuedTo, setTransferIssuedTo] = useState('');
   const [transferExpectedDate, setTransferExpectedDate] = useState('');
+  const [transferError, setTransferError] = useState<string | null>(null);
 
   // Group QR Modal
   const [showGroupQrModal, setShowGroupQrModal] = useState(false);
@@ -148,6 +173,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
 
   const isAdmin = currentUser?.role === 'ADMIN';
   const isEngineer = currentUser?.role === 'ENGINEER';
+  const isRegularUser = currentUser?.role === 'USER';
 
   const hasDimensionFilterActive = Boolean(
     lengthMin || lengthMax || widthMin || widthMax || heightMin || heightMax
@@ -281,6 +307,10 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
     setCustomFieldValue('');
     setCustomFieldMin('');
     setCustomFieldMax('');
+    if (isRegularUser) {
+      setTypeFields([]);
+      return;
+    }
     const endpoint = selectedTypeId
       ? `/api/equipment-types/${selectedTypeId}/fields`
       : '/api/additional-fields/global';
@@ -293,7 +323,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
         setTypeFields(filteredFields);
       })
       .catch(console.error);
-  }, [selectedTypeId]);
+  }, [selectedTypeId, isRegularUser]);
 
   // Selection toggle (preserves selections made on other pages)
   const toggleSelectAll = () => {
@@ -388,11 +418,20 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
   // Generate Writeoff Act DOCX
   const handleGenerateWriteoffAct = async () => {
     if (selectedIds.length === 0) return;
+    const actIds = items
+      .filter((it) => selectedIds.includes(it.id) && detectClientWriteoffCase(it) !== null)
+      .map((it) => it.id);
+    if (actIds.length === 0) {
+      setActionError(
+        'Для выбранного оборудования акт списания не формируется (нет кейса списания или отсутствует инв. номер).'
+      );
+      return;
+    }
     try {
       const res = await apiFetch('/api/writeoff/generate-act', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ equipment_ids: selectedIds }),
+        body: JSON.stringify({ equipment_ids: actIds }),
       });
 
       if (!res.ok) {
@@ -417,6 +456,17 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
   // Bulk update writeoff status
   const handleBulkWriteoffSubmit = async () => {
     if (selectedIds.length === 0) return;
+    const eligibleIds = items
+      .filter((it) => selectedIds.includes(it.id) && hasInventoryNumber(it))
+      .map((it) => it.id);
+    if (eligibleIds.length === 0) {
+      setActionError(
+        'Оборудование без инвентарного номера не находится на балансе и не подлежит списанию — его можно только удалить.'
+      );
+      setShowWriteoffModal(false);
+      setConfirmFinalWriteoff(false);
+      return;
+    }
     if (writeoffState === 'WRITTEN_OFF' && !confirmFinalWriteoff) {
       setConfirmFinalWriteoff(true);
       return;
@@ -426,13 +476,16 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          equipment_ids: selectedIds,
+          equipment_ids: eligibleIds,
           state: writeoffState,
           writeoff_date: writeoffState === 'WRITTEN_OFF' ? new Date().toISOString() : null,
         }),
       });
 
-      if (!res.ok) throw new Error('Ошибка обновления статуса списания');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.error || 'Ошибка обновления статуса списания');
+      }
       setShowWriteoffModal(false);
       setConfirmFinalWriteoff(false);
       setSelectedIds([]);
@@ -478,9 +531,29 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
     }
   };
 
+  const getTodayYmd = () => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
   // Bulk Transfer submit
   const handleBulkTransferSubmit = async () => {
-    if (selectedIds.length === 0 || !transferIssuedTo.trim()) return;
+    if (selectedIds.length === 0) return;
+    if (!transferIssuedTo.trim()) {
+      setTransferError('Укажите, кому передается оборудование');
+      return;
+    }
+
+    const todayYmd = getTodayYmd();
+    if (transferExpectedDate && transferExpectedDate < todayYmd) {
+      setTransferError('Ожидаемая дата возврата не может быть раньше сегодняшней даты');
+      return;
+    }
+
+    setTransferError(null);
     try {
       const res = await apiFetch('/api/equipment/transfers', {
         method: 'POST',
@@ -499,10 +572,11 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
       setShowTransferModal(false);
       setTransferIssuedTo('');
       setTransferExpectedDate('');
+      setTransferError(null);
       setSelectedIds([]);
       fetchEquipment();
     } catch (err: any) {
-      setActionError(err.message);
+      setTransferError(err.message);
     }
   };
 
@@ -549,22 +623,35 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
               </>
             )}
 
-            <button
-              type="button"
-              onClick={() => setShowDimensionsPanel((v) => !v)}
-              className={`px-3 py-2 rounded-xl text-xs font-semibold border transition-colors inline-flex items-center gap-1.5 ${
-                showDimensionsPanel || hasDimensionFilterActive
-                  ? 'bg-indigo-50 border-indigo-300 text-indigo-700'
-                  : 'border-slate-200 hover:bg-slate-50 text-slate-700'
-              }`}
-              title="Фильтр по размерам оборудования (Д*Ш*В)"
-            >
-              <Ruler className="w-4 h-4" />
-              <span>Размеры (Д×Ш×В)</span>
-              {hasDimensionFilterActive && (
-                <span className="w-2 h-2 rounded-full bg-indigo-600" />
-              )}
-            </button>
+            {isRegularUser && onOpenQrScanner && (
+              <button
+                type="button"
+                onClick={onOpenQrScanner}
+                className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors inline-flex items-center gap-1.5"
+              >
+                <QrCode className="w-4 h-4" />
+                <span>Сканировать QR-код</span>
+              </button>
+            )}
+
+            {!isRegularUser && (
+              <button
+                type="button"
+                onClick={() => setShowDimensionsPanel((v) => !v)}
+                className={`px-3 py-2 rounded-xl text-xs font-semibold border transition-colors inline-flex items-center gap-1.5 ${
+                  showDimensionsPanel || hasDimensionFilterActive
+                    ? 'bg-indigo-50 border-indigo-300 text-indigo-700'
+                    : 'border-slate-200 hover:bg-slate-50 text-slate-700'
+                }`}
+                title="Фильтр по размерам оборудования (Д*Ш*В)"
+              >
+                <Ruler className="w-4 h-4" />
+                <span>Размеры (Д×Ш×В)</span>
+                {hasDimensionFilterActive && (
+                  <span className="w-2 h-2 rounded-full bg-indigo-600" />
+                )}
+              </button>
+            )}
 
             {hasAnyFilterActive && (
               <button
@@ -588,7 +675,16 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
           </div>
         </div>
 
-        {/* Filter Row 1: Rooms, Types, Status, Condition */}
+        {isRegularUser && (
+          <div className="p-3 bg-indigo-50/70 border border-indigo-200 rounded-xl text-xs text-indigo-900 flex items-center justify-between gap-3">
+            <span>
+              Здесь отображается только оборудование, по которому вы отправляли сообщение о неисправности. Для подачи новой заявки отсканируйте QR-код на оборудовании.
+            </span>
+          </div>
+        )}
+
+        {/* Filter Row 1: Rooms, Types, Status, Condition (Staff only) */}
+        {!isRegularUser && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 pt-2 border-t border-slate-100 text-xs">
           {/* Room filter */}
           <div>
@@ -675,8 +771,10 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
             </select>
           </div>
         </div>
+        )}
 
-        {/* Filter Row 2: Accounting Category, Precious Metals, Warranty, Color */}
+        {/* Filter Row 2: Accounting Category, Precious Metals, Warranty, Color (Staff only) */}
+        {!isRegularUser && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 text-xs">
           {/* Accounting category */}
           <div>
@@ -763,9 +861,10 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
             </div>
           </div>
         </div>
+        )}
 
         {/* Collapsible Dimensions Filter Panel for Furniture (Размеры Д*Ш*В, см) */}
-        {showDimensionsPanel && (
+        {!isRegularUser && showDimensionsPanel && (
           <div className="p-3.5 bg-indigo-50/70 border border-indigo-200 rounded-xl space-y-2.5 text-xs">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 font-bold text-indigo-950">
@@ -894,7 +993,8 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
           </div>
         )}
 
-        {/* Filter Row 3: Dates, Dynamic fields and checkboxes */}
+        {/* Filter Row 3: Dates, Dynamic fields and checkboxes (Staff only) */}
+        {!isRegularUser && (
         <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-100 text-xs">
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex items-center gap-1.5">
@@ -1109,6 +1209,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
             )}
           </div>
         </div>
+        )}
       </div>
 
       {actionError && (
@@ -1128,8 +1229,8 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
         </div>
       )}
 
-      {/* Bulk actions banner if items selected */}
-      {selectedIds.length > 0 && (
+      {/* Bulk actions banner if items selected (Staff only) */}
+      {!isRegularUser && selectedIds.length > 0 && (
         <div className="bg-indigo-900 text-white p-3 sm:p-4 rounded-2xl flex flex-wrap items-center justify-between gap-3 shadow-md animate-fadeIn text-xs">
           <div className="flex items-center gap-2">
             <CheckSquare className="w-5 h-5 text-indigo-300" />
@@ -1162,7 +1263,7 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
               </span>
             </button>
 
-            {(isAdmin || isEngineer) && selectedIds.length >= 2 && (
+            {isAdmin && selectedIds.length >= 2 && (
               <button
                 onClick={() => setShowGroupQrModal(true)}
                 className="px-3 py-1.5 bg-purple-700 hover:bg-purple-600 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 transition-colors shadow-2xs"
@@ -1175,7 +1276,10 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
 
             {(isAdmin || isEngineer) && (
               <button
-                onClick={() => setShowTransferModal(true)}
+                onClick={() => {
+                  setTransferError(null);
+                  setShowTransferModal(true);
+                }}
                 className="px-3 py-1.5 bg-blue-700 hover:bg-blue-600 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 transition-colors"
               >
                 <ArrowRightLeft className="w-4 h-4 text-blue-300" />
@@ -1183,34 +1287,53 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
               </button>
             )}
 
-            {isAdmin && (
-              <>
-                <button
-                  onClick={() => setShowWriteoffModal(true)}
-                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 transition-colors"
-                >
-                  <FileText className="w-4 h-4 text-slate-300" />
-                  <span>Статус списания</span>
-                </button>
-                <button
-                  onClick={handleGenerateWriteoffAct}
-                  className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 transition-colors"
-                >
-                  <FileSpreadsheet className="w-4 h-4 text-emerald-300" />
-                  <span>Акт списания (DOCX)</span>
-                </button>
-                <button
-                  onClick={() => {
-                    setDeleteError(null);
-                    setDeleteTarget({ mode: 'bulk', ids: selectedIds });
-                  }}
-                  className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 transition-colors"
-                >
-                  <Trash2 className="w-4 h-4 text-red-100" />
-                  <span>Удалить выбранные</span>
-                </button>
-              </>
-            )}
+            {isAdmin && (() => {
+              const selectedObjs = items.filter((it) => selectedIds.includes(it.id));
+              const writeoffEligibleCount = selectedObjs.filter(hasInventoryNumber).length;
+              const actEligibleCount = selectedObjs.filter(
+                (it) => detectClientWriteoffCase(it) !== null
+              ).length;
+              return (
+                <>
+                  <button
+                    onClick={() => setShowWriteoffModal(true)}
+                    disabled={writeoffEligibleCount === 0}
+                    title={
+                      writeoffEligibleCount === 0
+                        ? 'Оборудование без инвентарного номера нельзя списать — его можно только удалить'
+                        : undefined
+                    }
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:bg-slate-600 disabled:opacity-50 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <FileText className="w-4 h-4 text-slate-300" />
+                    <span>Статус списания</span>
+                  </button>
+                  <button
+                    onClick={handleGenerateWriteoffAct}
+                    disabled={actEligibleCount === 0}
+                    title={
+                      actEligibleCount === 0
+                        ? 'Для выбранного оборудования нет кейса списания или отсутствует инв. номер'
+                        : undefined
+                    }
+                    className="px-3 py-1.5 bg-emerald-800 hover:bg-emerald-700 disabled:bg-slate-600 disabled:opacity-50 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-emerald-300" />
+                    <span>Акт списания (DOCX)</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setDeleteError(null);
+                      setDeleteTarget({ mode: 'bulk', ids: selectedIds });
+                    }}
+                    className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-xl font-semibold inline-flex items-center gap-1.5 transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4 text-red-100" />
+                    <span>Удалить выбранные</span>
+                  </button>
+                </>
+              );
+            })()}
 
             <button
               onClick={() => setSelectedIds([])}
@@ -1228,18 +1351,20 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-semibold uppercase tracking-wider text-[11px]">
-                <th className="p-3 w-10 text-center">
-                  <button
-                    onClick={toggleSelectAll}
-                    className="text-slate-400 hover:text-slate-700"
-                  >
-                    {items.length > 0 && items.every((i) => selectedIds.includes(i.id)) ? (
-                      <CheckSquare className="w-4 h-4 text-blue-600" />
-                    ) : (
-                      <Square className="w-4 h-4" />
-                    )}
-                  </button>
-                </th>
+                {!isRegularUser && (
+                  <th className="p-3 w-10 text-center">
+                    <button
+                      onClick={toggleSelectAll}
+                      className="text-slate-400 hover:text-slate-700"
+                    >
+                      {items.length > 0 && items.every((i) => selectedIds.includes(i.id)) ? (
+                        <CheckSquare className="w-4 h-4 text-blue-600" />
+                      ) : (
+                        <Square className="w-4 h-4" />
+                      )}
+                    </button>
+                  </th>
+                )}
                 <th className="p-3 w-14">ID</th>
                 <th className="p-3">Инв. номер</th>
                 <th className="p-3">Наименование и описание</th>
@@ -1248,59 +1373,85 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                 <th className="p-3">Габариты / Цвет</th>
                 <th className="p-3">Статус / Состояние</th>
                 <th className="p-3">Гарантия</th>
-                <th className="p-3">Первоначальная стоимость (BYN)</th>
+                {!isRegularUser && <th className="p-3">Первоначальная стоимость (BYN)</th>}
                 <th className="p-3 text-right">Действия</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {loading && items.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="p-8 text-center text-slate-400">
+                  <td colSpan={isRegularUser ? 9 : 11} className="p-8 text-center text-slate-400">
                     Загрузка списка оборудования...
                   </td>
                 </tr>
               ) : items.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="p-10 text-center text-slate-500">
+                  <td colSpan={isRegularUser ? 9 : 11} className="p-10 text-center text-slate-500">
                     <div className="font-semibold text-slate-700 text-xs mb-1">
-                      Оборудование не найдено
+                      {isRegularUser
+                        ? 'Нет оборудования с отправленными вами заявками о поломке'
+                        : 'Оборудование не найдено'}
                     </div>
                     <p className="text-[11px] text-slate-400">
-                      {total === 0
+                      {isRegularUser
+                        ? 'Чтобы сообщить о неисправности оборудования, отсканируйте его QR-код.'
+                        : total === 0
                         ? 'В реестре пока нет материальных ценностей — добавьте оборудование вручную или загрузите Excel-таблицу.'
                         : 'Попробуйте изменить параметры поиска или сбросить фильтры.'}
                     </p>
+                    {isRegularUser && onOpenQrScanner && (
+                      <button
+                        type="button"
+                        onClick={onOpenQrScanner}
+                        className="mt-3 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-colors"
+                      >
+                        <QrCode className="w-4 h-4" />
+                        <span>Сканировать QR-код</span>
+                      </button>
+                    )}
                   </td>
                 </tr>
               ) : (
                 (Array.isArray(items) ? items : []).map((item) => {
                   const isSelected = selectedIds.includes(item.id);
-                  const isWrittenOff = item.writeoffState === 'WRITTEN_OFF';
+                  const isWrittenOff = !isRegularUser && item.writeoffState === 'WRITTEN_OFF';
+                  const isDocsPrep = !isRegularUser && item.writeoffState === 'DOCUMENTS_PREPARATION';
+                  const isPreparingWriteoff = !isRegularUser && item.writeoffState === 'PREPARING';
                   const af = item.additional_fields || {};
                   const opStatus = af.status || 'Действует';
                   const cond = af.condition || 'Рабочее';
                   const cat = af.accounting_category;
                   const underWarranty = Boolean(af.is_under_warranty);
 
+                  const rowTintClass = isSelected
+                    ? 'bg-indigo-50/45 hover:bg-indigo-50/70'
+                    : isWrittenOff
+                    ? 'bg-slate-200/75 hover:bg-slate-200 text-slate-600'
+                    : isDocsPrep
+                    ? 'bg-[#f4e7cf] hover:bg-[#ecdabc]'
+                    : isPreparingWriteoff
+                    ? 'bg-[#fdf9ef] hover:bg-[#f7f0dc]'
+                    : 'hover:bg-slate-50/80';
+
                   return (
                     <tr
                       key={item.id}
-                      className={`hover:bg-slate-50/80 transition-colors ${
-                        isSelected ? 'bg-indigo-50/40' : ''
-                      } ${isWrittenOff ? 'opacity-60 bg-slate-50' : ''}`}
+                      className={`transition-colors ${rowTintClass}`}
                     >
-                      <td className="p-3 text-center">
-                        <button
-                          onClick={() => toggleSelect(item.id)}
-                          className="text-slate-400 hover:text-slate-700"
-                        >
-                          {isSelected ? (
-                            <CheckSquare className="w-4 h-4 text-indigo-600" />
-                          ) : (
-                            <Square className="w-4 h-4" />
-                          )}
-                        </button>
-                      </td>
+                      {!isRegularUser && (
+                        <td className="p-3 text-center">
+                          <button
+                            onClick={() => toggleSelect(item.id)}
+                            className="text-slate-400 hover:text-slate-700"
+                          >
+                            {isSelected ? (
+                              <CheckSquare className="w-4 h-4 text-indigo-600" />
+                            ) : (
+                              <Square className="w-4 h-4" />
+                            )}
+                          </button>
+                        </td>
+                      )}
                       <td className="p-3 font-mono font-semibold text-slate-500 whitespace-nowrap tabular-nums">
                         #{item.id}
                       </td>
@@ -1394,12 +1545,16 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                       <td className="p-3">
                         <div className="flex flex-col gap-1 items-start">
                           {isWrittenOff ? (
-                            <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-semibold text-[10px]">
+                            <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-700 border border-slate-300 font-semibold text-[10px]">
                               Списано
                             </span>
-                          ) : item.writeoffState === 'PREPARING' ? (
-                            <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 font-semibold text-[10px]">
-                              К списанию
+                          ) : isDocsPrep ? (
+                            <span className="px-2 py-0.5 rounded bg-[#ead5b2] text-amber-950 border border-[#d7be92] font-semibold text-[10px]">
+                              Проходит процедуру
+                            </span>
+                          ) : isPreparingWriteoff ? (
+                            <span className="px-2 py-0.5 rounded bg-[#f6ecd4] text-amber-900 border border-[#e6d6b1] font-semibold text-[10px]">
+                              Выбрано для списания
                             </span>
                           ) : (
                             <span
@@ -1452,13 +1607,15 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
                           </div>
                         )}
                       </td>
-                      <td className="p-3 text-slate-800 whitespace-nowrap font-medium tabular-nums">
-                        {Number(item.initial_cost || 0).toLocaleString('ru-RU', {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}{' '}
-                        BYN
-                      </td>
+                      {!isRegularUser && (
+                        <td className="p-3 text-slate-800 whitespace-nowrap font-medium tabular-nums">
+                          {Number(item.initial_cost || 0).toLocaleString('ru-RU', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{' '}
+                          BYN
+                        </td>
+                      )}
                       <td className="p-3 text-right whitespace-nowrap">
                         <div className="inline-flex items-center gap-1.5">
                           <button
@@ -1519,68 +1676,85 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
       </div>
 
       {/* Sub-modal: Bulk write-off status */}
-      {showWriteoffModal && (
-        <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-900/50 p-4">
-          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-4">
-            <h3 className="font-bold text-base text-slate-900">
-              Изменение статуса списания ({selectedIds.length} ед.)
-            </h3>
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Выберите статус
-              </label>
-              <select
-                value={writeoffState}
-                onChange={(e: any) => {
-                  setWriteoffState(e.target.value);
-                  setConfirmFinalWriteoff(false);
-                }}
-                className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none"
-              >
-                <option value="PREPARING">Готовится к списанию</option>
-                <option value="DOCUMENTS_PREPARATION">
-                  В процессе списания (подготовка документов)
-                </option>
-                <option value="WRITTEN_OFF">Списано с баланса</option>
-              </select>
-            </div>
-            {confirmFinalWriteoff && writeoffState === 'WRITTEN_OFF' && (
-              <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 space-y-1">
-                <div className="font-bold">Подтвердите окончательное списание</div>
-                <p>
-                  Выбранное оборудование ({selectedIds.length} ед.) будет окончательно списано с
-                  баланса, а его редактирование, выдача и инвентаризация — заблокированы.
-                </p>
+      {showWriteoffModal && (() => {
+        const selectedObjs = items.filter((it) => selectedIds.includes(it.id));
+        const eligibleObjs = selectedObjs.filter(hasInventoryNumber);
+        const skippedNoInv = selectedObjs.filter((it) => !hasInventoryNumber(it));
+        return (
+          <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-900/50 p-4">
+            <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-4">
+              <h3 className="font-bold text-base text-slate-900">
+                Изменение статуса списания ({eligibleObjs.length} ед.)
+              </h3>
+              {skippedNoInv.length > 0 && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 space-y-1">
+                  <div className="font-semibold">
+                    Исключены позиции без инв. номера: {skippedNoInv.length} шт.
+                  </div>
+                  <p>
+                    Оборудование без инвентарного номера не числится на балансе и не подлежит
+                    списанию — его можно только удалить.
+                  </p>
+                </div>
+              )}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Выберите статус
+                </label>
+                <select
+                  value={writeoffState}
+                  onChange={(e: any) => {
+                    setWriteoffState(e.target.value);
+                    setConfirmFinalWriteoff(false);
+                  }}
+                  className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none"
+                >
+                  <option value="PREPARING">Готовится к списанию</option>
+                  <option value="DOCUMENTS_PREPARATION">
+                    В процессе списания (подготовка документов)
+                  </option>
+                  <option value="WRITTEN_OFF">Списано с баланса</option>
+                </select>
               </div>
-            )}
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowWriteoffModal(false);
-                  setConfirmFinalWriteoff(false);
-                }}
-                className="px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl"
-              >
-                Отмена
-              </button>
-              <button
-                type="button"
-                onClick={handleBulkWriteoffSubmit}
-                className={`px-4 py-2 text-xs font-bold text-white rounded-xl ${
-                  confirmFinalWriteoff && writeoffState === 'WRITTEN_OFF'
-                    ? 'bg-red-600 hover:bg-red-700'
-                    : 'bg-blue-600 hover:bg-blue-700'
-                }`}
-              >
-                {confirmFinalWriteoff && writeoffState === 'WRITTEN_OFF'
-                  ? 'Подтвердить списание'
-                  : 'Применить'}
-              </button>
+              {confirmFinalWriteoff && writeoffState === 'WRITTEN_OFF' && (
+                <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 space-y-1">
+                  <div className="font-bold">Подтвердите окончательное списание</div>
+                  <p>
+                    Выбранное оборудование ({eligibleObjs.length} ед.) будет окончательно списано с
+                    баланса, а его редактирование, выдача и инвентаризация — заблокированы.
+                  </p>
+                </div>
+              )}
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowWriteoffModal(false);
+                    setConfirmFinalWriteoff(false);
+                  }}
+                  className="px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={handleBulkWriteoffSubmit}
+                  disabled={eligibleObjs.length === 0}
+                  className={`px-4 py-2 text-xs font-bold text-white rounded-xl disabled:opacity-50 ${
+                    confirmFinalWriteoff && writeoffState === 'WRITTEN_OFF'
+                      ? 'bg-red-600 hover:bg-red-700'
+                      : 'bg-blue-600 hover:bg-blue-700'
+                  }`}
+                >
+                  {confirmFinalWriteoff && writeoffState === 'WRITTEN_OFF'
+                    ? 'Подтвердить списание'
+                    : 'Применить'}
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Sub-modal: Bulk transfer */}
       {showTransferModal && (
@@ -1592,6 +1766,12 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
             <p className="text-xs text-slate-500">
               Параметры передачи будут выставлены одинаковые для всех выбранных единиц
             </p>
+            {transferError && (
+              <div className="p-2.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                <span>{transferError}</span>
+              </div>
+            )}
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
                 Кому передается *
@@ -1599,7 +1779,10 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
               <input
                 type="text"
                 value={transferIssuedTo}
-                onChange={(e) => setTransferIssuedTo(e.target.value)}
+                onChange={(e) => {
+                  setTransferIssuedTo(e.target.value);
+                  if (transferError) setTransferError(null);
+                }}
                 placeholder="ФИО / отдел / лаборатория"
                 className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none"
                 required
@@ -1611,15 +1794,22 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
               </label>
               <input
                 type="date"
+                min={getTodayYmd()}
                 value={transferExpectedDate}
-                onChange={(e) => setTransferExpectedDate(e.target.value)}
+                onChange={(e) => {
+                  setTransferExpectedDate(e.target.value);
+                  if (transferError) setTransferError(null);
+                }}
                 className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none"
               />
             </div>
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="button"
-                onClick={() => setShowTransferModal(false)}
+                onClick={() => {
+                  setTransferError(null);
+                  setShowTransferModal(false);
+                }}
                 className="px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl"
               >
                 Отмена

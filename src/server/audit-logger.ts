@@ -35,7 +35,6 @@ export const ENGINEER_ALLOWED_CATEGORIES: AuditCategory[] = [
   'MAINTENANCE',
   'TRANSFER',
   'INVENTORY',
-  'WRITEOFF',
   'DOCUMENT',
 ];
 
@@ -76,7 +75,7 @@ export function getRoleLogCapabilities(role: UserRole): RoleLogCapabilities {
       scope: 'OPERATIONAL',
       scopeTitle: 'Операционно-технический журнал',
       scopeDescription:
-        'Доступ к событиям по оборудованию, неисправностям, передачам, инвентаризации, списанию и документам, а также к своим входам. События безопасности, администрирования и чужие IP скрыты.',
+        'Доступ к событиям по оборудованию, неисправностям, передачам, инвентаризации и документам, а также к своим входам. Списание, безопасность, администрирование и чужие IP скрыты.',
       allowedCategories: [...ENGINEER_ALLOWED_CATEGORIES, 'AUTH'],
       canViewAllUsers: false,
       canViewSecurityEvents: false,

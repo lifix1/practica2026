@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   X,
   Upload,
@@ -54,12 +54,29 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
     }>;
   } | null>(null);
 
-  React.useEffect(() => {
+  const [isDraggingFile, setIsDraggingFile] = useState(false);
+  const dragCounterRef = useRef(0);
+
+  useEffect(() => {
     if (!isOpen) {
       setDuplicateConfirmation(null);
       setErrors([]);
       setImportResult(null);
+      setIsDraggingFile(false);
+      dragCounterRef.current = 0;
+      return;
     }
+
+    // Prevent Chrome/Firefox from opening or downloading a file if dropped anywhere while modal is open
+    const preventWindowDrop = (e: DragEvent) => {
+      e.preventDefault();
+    };
+    window.addEventListener('dragover', preventWindowDrop);
+    window.addEventListener('drop', preventWindowDrop);
+    return () => {
+      window.removeEventListener('dragover', preventWindowDrop);
+      window.removeEventListener('drop', preventWindowDrop);
+    };
   }, [isOpen]);
 
   if (!isOpen) return null;
@@ -153,10 +170,11 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
     }
   };
 
-  // Handle file select
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const processExcelFile = (file: File) => {
+    if (!/\.(xlsx|xls)$/i.test(file.name)) {
+      setErrors(['Поддерживаются только файлы Excel (.xlsx, .xls)']);
+      return;
+    }
 
     setFileName(file.name);
     setErrors([]);
@@ -181,6 +199,54 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
       }
     };
     reader.readAsArrayBuffer(file);
+  };
+
+  // Handle file select
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      processExcelFile(file);
+    }
+    e.target.value = '';
+  };
+
+  // Drag & Drop handlers on the upload zone
+  const handleDragEnter = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current += 1;
+    setIsDraggingFile(true);
+  };
+
+  const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'copy';
+    }
+    if (!isDraggingFile) {
+      setIsDraggingFile(true);
+    }
+  };
+
+  const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+    if (dragCounterRef.current === 0) {
+      setIsDraggingFile(false);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current = 0;
+    setIsDraggingFile(false);
+    const file = e.dataTransfer?.files?.[0];
+    if (file) {
+      processExcelFile(file);
+    }
   };
 
   // Submit to server (duplicate_mode: 'ask' checks first; confirmed action uses 'skip' | 'update' | 'copy')
@@ -247,7 +313,11 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-6 animate-fadeIn">
+    <div
+      onDragOver={(e) => e.preventDefault()}
+      onDrop={(e) => e.preventDefault()}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-3 sm:p-6 animate-fadeIn"
+    >
       <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-3xl overflow-hidden flex flex-col max-h-[92vh]">
         {/* Header */}
         <div className="px-6 py-4 bg-emerald-900 text-white flex items-center justify-between">
@@ -337,10 +407,26 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
           </div>
 
           {/* Upload Area */}
-          <div className="border-2 border-dashed border-slate-300 rounded-2xl p-6 text-center hover:border-emerald-500 transition-colors bg-white">
-            <Upload className="w-10 h-10 text-slate-400 mx-auto mb-2" />
+          <div
+            onDragEnter={handleDragEnter}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`border-2 border-dashed rounded-2xl p-6 text-center transition-colors ${
+              isDraggingFile
+                ? 'border-emerald-500 bg-emerald-50/70 ring-2 ring-emerald-500/20'
+                : 'border-slate-300 hover:border-emerald-500 bg-white'
+            }`}
+          >
+            <Upload
+              className={`w-10 h-10 mx-auto mb-2 transition-colors ${
+                isDraggingFile ? 'text-emerald-600' : 'text-slate-400'
+              }`}
+            />
             <div className="text-xs font-medium text-slate-700 mb-1">
-              Выберите или перетащите файл Excel (.xlsx, .xls)
+              {isDraggingFile
+                ? 'Отпустите файл Excel для загрузки'
+                : 'Выберите или перетащите файл Excel (.xlsx, .xls)'}
             </div>
             <p className="text-[11px] text-slate-400 mb-3">
               Первая строка листа должна содержать названия столбцов (как в шаблоне кафедры)

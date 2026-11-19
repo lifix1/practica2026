@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   X,
+  AlertCircle,
   AlertTriangle,
   Clock,
   History,
@@ -12,6 +13,7 @@ import {
   Lock,
   RefreshCw,
   Download,
+  RotateCcw,
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import type {
@@ -25,6 +27,7 @@ import { QrSizeSelector } from './QrSizeSelector.tsx';
 
 interface EquipmentDetailModalProps {
   equipmentId: number | null;
+  qrToken?: string | null;
   currentUser: User | null;
   onClose: () => void;
   onEditEquipment: (item: any) => void;
@@ -33,8 +36,32 @@ interface EquipmentDetailModalProps {
   onOpenLogin?: () => void;
 }
 
+function hasInventoryNum(item: any): boolean {
+  return Boolean(item?.inventory_number && String(item.inventory_number).trim());
+}
+
+function isPreciousFlagTrue(val: unknown): boolean {
+  if (val === true || val === 1) return true;
+  if (typeof val === 'string') {
+    const s = val.trim().toLowerCase();
+    return s === 'true' || s === '1' || s === 'да' || s === 'yes';
+  }
+  return false;
+}
+
+function detectDetailWriteoffCase(item: any): 'case1' | 'case2' | 'case3' | null {
+  if (!hasInventoryNum(item)) return null;
+  const cat = String(item?.additional_fields?.accounting_category || '').toLowerCase();
+  const hasDm = isPreciousFlagTrue(item?.additional_fields?.precious_metals);
+  if (cat.includes('малоцен') && hasDm) return 'case2';
+  if (cat.includes('малоцен') && !hasDm) return 'case3';
+  if (cat.includes('дорогостоящ') && hasDm) return 'case1';
+  return null;
+}
+
 export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
   equipmentId,
+  qrToken,
   currentUser,
   onClose,
   onEditEquipment,
@@ -63,11 +90,14 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [transferIssuedTo, setTransferIssuedTo] = useState('');
   const [transferExpectedDate, setTransferExpectedDate] = useState('');
+  const [transferError, setTransferError] = useState<string | null>(null);
 
   // Writeoff modal & status state
   const [showWriteoffModal, setShowWriteoffModal] = useState(false);
   const [targetWriteoffState, setTargetWriteoffState] = useState<'PREPARING' | 'DOCUMENTS_PREPARATION' | 'WRITTEN_OFF'>('DOCUMENTS_PREPARATION');
   const [confirmFinalWriteoff, setConfirmFinalWriteoff] = useState(false);
+  const [showRollbackConfirm, setShowRollbackConfirm] = useState(false);
+  const [rollbackLoading, setRollbackLoading] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<{
     type: 'success' | 'error';
@@ -78,6 +108,9 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
 
   const isEngineer = currentUser?.role === 'ENGINEER';
   const isAdmin = currentUser?.role === 'ADMIN';
+  const isRegularUser = currentUser?.role === 'USER';
+
+  const qrQuerySuffix = qrToken ? `?qr_token=${encodeURIComponent(qrToken)}` : '';
 
   const fetchDetail = () => {
     if (!equipmentId) return;
@@ -85,7 +118,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
     setLoading(true);
     setError(null);
 
-    apiFetch(`/api/equipment/${equipmentId}`)
+    apiFetch(`/api/equipment/${equipmentId}${qrQuerySuffix}`)
       .then(async (res) => {
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
@@ -95,11 +128,13 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       })
       .then((detail) => {
         setData(detail);
-        const qrPayload = detail.qrCode || detail.inventory_number || String(detail.id);
+        const qrPayload = detail.qrCode || (!isRegularUser ? (detail.inventory_number || String(detail.id)) : '');
         if (qrPayload) {
           QRCode.toDataURL(qrPayload, { width: 220, margin: 1 })
             .then(setQrDataUrl)
             .catch(console.error);
+        } else {
+          setQrDataUrl('');
         }
       })
       .catch((err) => setError(err.message))
@@ -108,7 +143,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
 
   useEffect(() => {
     fetchDetail();
-  }, [equipmentId, currentUser]);
+  }, [equipmentId, qrToken, currentUser]);
 
   if (!equipmentId) return null;
 
@@ -149,6 +184,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
           state: issueState,
           description: issueDesc,
           broken_at: issueDate,
+          qr_token: qrToken || undefined,
         }),
       });
 
@@ -162,7 +198,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       setShowIssueModal(false);
       setIssueDesc('');
       // Reload details
-      const detailRes = await apiFetch(`/api/equipment/${equipmentId}`);
+      const detailRes = await apiFetch(`/api/equipment/${equipmentId}${qrQuerySuffix}`);
       const updated = await detailRes.json();
       setData(updated);
       onReloadList();
@@ -181,7 +217,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       });
       if (!res.ok) throw new Error('Ошибка обновления статуса неисправности');
 
-      const detailRes = await apiFetch(`/api/equipment/${equipmentId}`);
+      const detailRes = await apiFetch(`/api/equipment/${equipmentId}${qrQuerySuffix}`);
       const updated = await detailRes.json();
       setData(updated);
       onReloadList();
@@ -193,7 +229,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
   // Load Issues History
   const handleLoadIssueHistory = async () => {
     try {
-      const res = await apiFetch(`/api/equipment/${equipmentId}/issues`);
+      const res = await apiFetch(`/api/equipment/${equipmentId}/issues${qrQuerySuffix}`);
       const list = await res.json();
       setIssuesHistory(Array.isArray(list) ? list : []);
       setShowIssueHistory(true);
@@ -233,11 +269,29 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
     }
   };
 
+  const getTodayYmd = () => {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth() + 1).padStart(2, '0');
+    const d = String(now.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
   // Handle Transfer Submit
   const handleTransferSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!transferIssuedTo.trim()) return;
+    if (!transferIssuedTo.trim()) {
+      setTransferError('Укажите, кому передается оборудование');
+      return;
+    }
 
+    const todayYmd = getTodayYmd();
+    if (transferExpectedDate && transferExpectedDate < todayYmd) {
+      setTransferError('Предполагаемая дата возврата не может быть раньше сегодняшней даты');
+      return;
+    }
+
+    setTransferError(null);
     try {
       const res = await apiFetch('/api/equipment/transfers', {
         method: 'POST',
@@ -256,12 +310,13 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       setShowTransferModal(false);
       setTransferIssuedTo('');
       setTransferExpectedDate('');
+      setTransferError(null);
       const detailRes = await apiFetch(`/api/equipment/${equipmentId}`);
       const updated = await detailRes.json();
       setData(updated);
       onReloadList();
     } catch (err: any) {
-      setActionFeedback({ type: 'error', text: err.message });
+      setTransferError(err.message);
     }
   };
 
@@ -327,7 +382,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       a.remove();
       window.URL.revokeObjectURL(url);
     } catch (e: any) {
-      setError(e.message);
+      setActionFeedback({ type: 'error', text: e.message || 'Ошибка формирования акта списания' });
     }
   };
 
@@ -358,6 +413,36 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
       onReloadList();
     } catch (e: any) {
       setActionFeedback({ type: 'error', text: e.message });
+    }
+  };
+
+  // Rollback writeoff for current item
+  const handleConfirmDetailRollback = async () => {
+    if (!equipmentId) return;
+    setRollbackLoading(true);
+    try {
+      const res = await apiFetch('/api/writeoff/rollback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          equipment_ids: [equipmentId],
+          target_state: 'NONE',
+        }),
+      });
+      const resData = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(resData.error || 'Ошибка отката списания');
+
+      setShowRollbackConfirm(false);
+      setActionFeedback({
+        type: 'success',
+        text: 'Списание откачено — оборудование возвращено в активный учёт.',
+      });
+      fetchDetail();
+      onReloadList();
+    } catch (e: any) {
+      setActionFeedback({ type: 'error', text: e.message || 'Ошибка отката списания' });
+    } finally {
+      setRollbackLoading(false);
     }
   };
 
@@ -530,43 +615,62 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                 </div>
               )}
 
-              {/* Status alerts */}
-              {data.writeoffState && (
-                <div className="p-3.5 bg-purple-50 border border-purple-200 rounded-xl text-purple-900 text-xs flex flex-wrap items-center justify-between gap-3">
+              {/* Status alerts (Writeoff is ADMIN only in detail view) */}
+              {isAdmin && data.writeoffState && (
+                <div
+                  className={`p-3.5 rounded-xl text-xs flex flex-wrap items-center justify-between gap-3 border ${
+                    data.writeoffState === 'WRITTEN_OFF'
+                      ? 'bg-slate-200/75 border-slate-300 text-slate-800'
+                      : data.writeoffState === 'DOCUMENTS_PREPARATION'
+                      ? 'bg-[#f4e7cf] border-[#d7be92] text-amber-950'
+                      : 'bg-[#fdf9ef] border-[#e6d6b1] text-amber-900'
+                  }`}
+                >
                   <div className="flex items-center gap-2">
-                    <FileText className="w-4 h-4 text-purple-600 shrink-0" />
+                    <FileText className="w-4 h-4 shrink-0 opacity-75" />
                     <span>
                       Статус списания:{' '}
-                      <strong className="text-purple-950 font-bold">
+                      <strong className="font-bold">
                         {data.writeoffState === 'PREPARING'
-                          ? 'Готовится к списанию'
+                          ? 'Выбрано для списания'
                           : data.writeoffState === 'DOCUMENTS_PREPARATION'
-                          ? 'В процессе списания (подготовка документов)'
-                          : 'Списано с баланса'}
+                          ? 'Проходит процедуру'
+                          : 'Списано'}
                       </strong>
                       {data.writeoffDate && ` (${new Date(data.writeoffDate).toLocaleDateString('ru-RU')})`}
                     </span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={handleDownloadActForCurrentItem}
-                      className="px-3 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1 shadow-xs transition-colors"
-                      title="Сформировать и скачать официальный акт списания (DOCX)"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Скачать Акт (DOCX)
-                    </button>
-                    {(isAdmin || isEngineer) && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    {detectDetailWriteoffCase(data) !== null && (
+                      <button
+                        onClick={handleDownloadActForCurrentItem}
+                        className="px-3 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1 shadow-xs transition-colors"
+                        title="Сформировать и скачать официальный акт списания (DOCX)"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        Скачать Акт (DOCX)
+                      </button>
+                    )}
+                    {hasInventoryNum(data) && (
                       <button
                         onClick={() => {
                           setTargetWriteoffState(data.writeoffState || 'DOCUMENTS_PREPARATION');
                           setShowWriteoffModal(true);
                         }}
-                        className="px-2.5 py-1 bg-white hover:bg-purple-100 border border-purple-200 text-purple-800 rounded-lg text-xs font-medium transition-colors"
+                        className="px-2.5 py-1 bg-white/85 hover:bg-white border border-slate-300 text-slate-800 rounded-lg text-xs font-medium transition-colors"
                       >
                         Сменить статус
                       </button>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => setShowRollbackConfirm(true)}
+                      className="px-2.5 py-1 bg-white/85 hover:bg-amber-50 border border-amber-300 text-amber-800 rounded-lg text-xs font-medium inline-flex items-center gap-1 transition-colors"
+                      title="Откатить списание (вернуть в активный учёт)"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Откатить
+                    </button>
                   </div>
                 </div>
               )}
@@ -651,63 +755,65 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
               )}
 
               {/* Grid: QR Code & Basic Passport Info */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                {/* QR Code column */}
-                <div className="border border-slate-200 rounded-2xl p-4 flex flex-col items-center justify-center bg-slate-50/60 text-center">
-                  <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs mb-2">
-                    {qrDataUrl ? (
-                      <img
-                        src={qrDataUrl}
-                        alt="QR Code"
-                        className="w-40 h-40 object-contain"
-                      />
-                    ) : (
-                      <div className="w-40 h-40 flex items-center justify-center text-slate-400">
-                        Генерация QR...
-                      </div>
-                    )}
-                  </div>
-                  <span className="text-[11px] font-mono text-slate-700 font-bold">
-                    {data.inventory_number ? `Инв. № ${data.inventory_number}` : `Без инв. номера (ID #${data.id})`}
-                  </span>
-                  {data.qrCode && (
-                    <div className="mt-1 px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700 text-[10px] font-mono select-all">
-                      Код QR: {data.qrCode}
+              <div className={`grid grid-cols-1 ${isRegularUser ? '' : 'md:grid-cols-3'} gap-6`}>
+                {/* QR Code column (Staff only) */}
+                {!isRegularUser && (
+                  <div className="border border-slate-200 rounded-2xl p-4 flex flex-col items-center justify-center bg-slate-50/60 text-center">
+                    <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-xs mb-2">
+                      {qrDataUrl ? (
+                        <img
+                          src={qrDataUrl}
+                          alt="QR Code"
+                          className="w-40 h-40 object-contain"
+                        />
+                      ) : (
+                        <div className="w-40 h-40 flex items-center justify-center text-slate-400">
+                          Генерация QR...
+                        </div>
+                      )}
                     </div>
-                  )}
-                  <p className="text-[10px] text-slate-500 mt-1 max-w-[200px] leading-tight">
-                    🔒 Внутри QR зашит только внутренний код без адреса сайта и домена.
-                  </p>
-                  <div className="mt-2.5 flex flex-col items-center gap-2 w-full">
-                    {(isAdmin || isEngineer) && (
-                      <div className="w-full p-2.5 bg-white rounded-xl border border-slate-200 space-y-2">
-                        <QrSizeSelector value={qrSizeCm} onChange={setQrSizeCm} compact />
-                        <button
-                          type="button"
-                          onClick={handleDownloadSingleQrDocx}
-                          disabled={downloadingQrDocx}
-                          className="w-full px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors"
-                        >
-                          <FileText className="w-3.5 h-3.5" />
-                          {downloadingQrDocx
-                            ? 'Формирование...'
-                            : `Этикетка DOCX (${qrSizeCm}×${qrSizeCm} см)`}
-                        </button>
+                    <span className="text-[11px] font-mono text-slate-700 font-bold">
+                      {data.inventory_number ? `Инв. № ${data.inventory_number}` : `Без инв. номера (ID #${data.id})`}
+                    </span>
+                    {data.qrCode && (
+                      <div className="mt-1 px-2 py-0.5 rounded bg-blue-50 border border-blue-200 text-blue-700 text-[10px] font-mono select-all">
+                        Код QR: {data.qrCode}
                       </div>
                     )}
-                    <a
-                      href={qrDataUrl}
-                      download={`QR-${data.inventory_number || `ID-${data.id}`}.png`}
-                      className="text-xs text-blue-600 hover:text-blue-800 font-semibold inline-flex items-center gap-1"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Скачать изображение QR (PNG)
-                    </a>
+                    <p className="text-[10px] text-slate-500 mt-1 max-w-[200px] leading-tight">
+                      🔒 Внутри QR зашит только внутренний код без адреса сайта и домена.
+                    </p>
+                    <div className="mt-2.5 flex flex-col items-center gap-2 w-full">
+                      {(isAdmin || isEngineer) && (
+                        <div className="w-full p-2.5 bg-white rounded-xl border border-slate-200 space-y-2">
+                          <QrSizeSelector value={qrSizeCm} onChange={setQrSizeCm} compact />
+                          <button
+                            type="button"
+                            onClick={handleDownloadSingleQrDocx}
+                            disabled={downloadingQrDocx}
+                            className="w-full px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-400 text-white rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors"
+                          >
+                            <FileText className="w-3.5 h-3.5" />
+                            {downloadingQrDocx
+                              ? 'Формирование...'
+                              : `Этикетка DOCX (${qrSizeCm}×${qrSizeCm} см)`}
+                          </button>
+                        </div>
+                      )}
+                      <a
+                        href={qrDataUrl}
+                        download={`QR-${data.inventory_number || `ID-${data.id}`}.png`}
+                        className="text-xs text-blue-600 hover:text-blue-800 font-semibold inline-flex items-center gap-1"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        Скачать изображение QR (PNG)
+                      </a>
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {/* Passport Details column */}
-                <div className="md:col-span-2 space-y-3">
+                <div className={`${isRegularUser ? '' : 'md:col-span-2'} space-y-3`}>
                   <h4 className="text-xs font-bold uppercase text-slate-500 tracking-wider">
                     Паспортные данные
                   </h4>
@@ -731,32 +837,36 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                         {data.recived ? new Date(data.recived).toLocaleDateString('ru-RU') : 'Не указана'}
                       </span>
                     </div>
-                    <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                      <span className="text-slate-500 block">Первоначальная стоимость</span>
-                      <span className="font-semibold text-slate-900 text-sm">
-                        {Number(data.initial_cost || 0).toLocaleString('ru-RU', {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}{' '}
-                        BYN
-                      </span>
-                    </div>
-                    <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                      <span className="text-slate-500 block">Остаточная стоимость</span>
-                      <span className="font-semibold text-slate-900 text-sm">
-                        {data.residual_cost !== null && data.residual_cost !== undefined ? (
-                          <>
-                            {Number(data.residual_cost).toLocaleString('ru-RU', {
+                    {!isRegularUser && (
+                      <>
+                        <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                          <span className="text-slate-500 block">Первоначальная стоимость</span>
+                          <span className="font-semibold text-slate-900 text-sm">
+                            {Number(data.initial_cost || 0).toLocaleString('ru-RU', {
                               minimumFractionDigits: 2,
                               maximumFractionDigits: 2,
                             })}{' '}
                             BYN
-                          </>
-                        ) : (
-                          'Не указана'
-                        )}
-                      </span>
-                    </div>
+                          </span>
+                        </div>
+                        <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                          <span className="text-slate-500 block">Остаточная стоимость</span>
+                          <span className="font-semibold text-slate-900 text-sm">
+                            {data.residual_cost !== null && data.residual_cost !== undefined ? (
+                              <>
+                                {Number(data.residual_cost).toLocaleString('ru-RU', {
+                                  minimumFractionDigits: 2,
+                                  maximumFractionDigits: 2,
+                                })}{' '}
+                                BYN
+                              </>
+                            ) : (
+                              'Не указана'
+                            )}
+                          </span>
+                        </div>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -898,8 +1008,16 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
               {/* Actions Footer */}
               <div className="border-t border-slate-200 pt-5 flex flex-wrap gap-2 justify-between">
                 <div className="flex flex-wrap gap-2">
-                  {/* Report Issue button: enabled if not written off */}
-                  {data.writeoffState !== 'WRITTEN_OFF' ? (
+                  {/* Report Issue button: enabled if not written off AND (staff or opened via QR scan) */}
+                  {data.writeoffState === 'WRITTEN_OFF' ? (
+                    <span className="text-xs text-slate-400 italic py-2">
+                      (Оборудование списано, регистрация неисправностей недоступна)
+                    </span>
+                  ) : isRegularUser && (!qrToken || data.canReportIssue === false) ? (
+                    <span className="text-xs text-amber-700 bg-amber-50 border border-amber-200 px-3 py-2 rounded-xl">
+                      Для отправки новой заявки о поломке отсканируйте QR-код на оборудовании
+                    </span>
+                  ) : (
                     <button
                       onClick={() => setShowIssueModal(true)}
                       className="px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-colors"
@@ -907,16 +1025,15 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                       <AlertTriangle className="w-4 h-4" />
                       Сообщить о неисправности
                     </button>
-                  ) : (
-                    <span className="text-xs text-slate-400 italic py-2">
-                      (Оборудование списано, регистрация неисправностей недоступна)
-                    </span>
                   )}
 
                   {/* Transfer button (Admin or Engineer) */}
                   {(isAdmin || isEngineer) && data.writeoffState !== 'WRITTEN_OFF' && (
                     <button
-                      onClick={() => setShowTransferModal(true)}
+                      onClick={() => {
+                        setTransferError(null);
+                        setShowTransferModal(true);
+                      }}
                       disabled={Boolean(data.activeTransfer)}
                       className="px-3 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 text-white rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-colors"
                     >
@@ -931,7 +1048,7 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                     className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-medium inline-flex items-center gap-1.5 transition-colors"
                   >
                     <History className="w-4 h-4" />
-                    История неисправностей
+                    {isRegularUser ? 'Мои заявки о поломках' : 'История неисправностей'}
                   </button>
 
                   {(isAdmin || isEngineer) && (
@@ -944,17 +1061,31 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                     </button>
                   )}
 
-                  {(isAdmin || isEngineer) && (
-                    <button
-                      onClick={() => {
-                        setTargetWriteoffState(data.writeoffState || 'DOCUMENTS_PREPARATION');
-                        setShowWriteoffModal(true);
-                      }}
-                      className="px-3 py-2 bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-colors"
-                    >
-                      <FileText className="w-4 h-4" />
-                      {data.writeoffState ? 'Списание и Акт' : 'Оформить списание'}
-                    </button>
+                  {isAdmin && (
+                    hasInventoryNum(data) ? (
+                      <button
+                        onClick={() => {
+                          setTargetWriteoffState(data.writeoffState || 'DOCUMENTS_PREPARATION');
+                          setShowWriteoffModal(true);
+                        }}
+                        className="px-3 py-2 bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 shadow-xs transition-colors"
+                      >
+                        <FileText className="w-4 h-4" />
+                        {data.writeoffState
+                          ? detectDetailWriteoffCase(data)
+                            ? 'Списание и Акт'
+                            : 'Статус списания'
+                          : 'Оформить списание'}
+                      </button>
+                    ) : (
+                      <span
+                        className="px-3 py-2 bg-slate-100 border border-slate-200 text-slate-500 rounded-xl text-xs font-medium inline-flex items-center gap-1.5"
+                        title="Оборудование без инвентарного номера не числится на балансе и не подлежит списанию — его можно только удалить"
+                      >
+                        <FileText className="w-4 h-4 text-slate-400" />
+                        Без инв. № (только удаление)
+                      </span>
+                    )
                   )}
                 </div>
 
@@ -1107,6 +1238,12 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
               Передача во временное пользование
             </h3>
             <form onSubmit={handleTransferSubmit} className="space-y-4">
+              {transferError && (
+                <div className="p-2.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                  <span>{transferError}</span>
+                </div>
+              )}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Кому передается (ФИО / должность / аудитория)
@@ -1114,7 +1251,10 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                 <input
                   type="text"
                   value={transferIssuedTo}
-                  onChange={(e) => setTransferIssuedTo(e.target.value)}
+                  onChange={(e) => {
+                    setTransferIssuedTo(e.target.value);
+                    if (transferError) setTransferError(null);
+                  }}
                   placeholder="Например: доц. Иванов И.И. (для командировки)"
                   className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none"
                   required
@@ -1127,8 +1267,12 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                 </label>
                 <input
                   type="date"
+                  min={getTodayYmd()}
                   value={transferExpectedDate}
-                  onChange={(e) => setTransferExpectedDate(e.target.value)}
+                  onChange={(e) => {
+                    setTransferExpectedDate(e.target.value);
+                    if (transferError) setTransferError(null);
+                  }}
                   className="w-full text-xs p-2.5 border border-slate-300 rounded-xl outline-none"
                 />
               </div>
@@ -1136,7 +1280,10 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setShowTransferModal(false)}
+                  onClick={() => {
+                    setTransferError(null);
+                    setShowTransferModal(false);
+                  }}
                   className="px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl"
                 >
                   Отмена
@@ -1276,8 +1423,8 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
         </div>
       )}
 
-      {/* Sub-Modal: Write-off & Act */}
-      {showWriteoffModal && (
+      {/* Sub-Modal: Write-off & Act (Admin only) */}
+      {isAdmin && showWriteoffModal && (
         <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-900/50 p-4">
           <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-md w-full p-6 space-y-4">
             <div className="flex items-center justify-between pb-2 border-b border-slate-100">
@@ -1347,22 +1494,29 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                 </div>
               )}
 
-              <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl space-y-2">
-                <div className="font-semibold text-emerald-950 flex items-center justify-between">
-                  <span>Официальный Акт списания (DOCX):</span>
+              {detectDetailWriteoffCase(data) !== null ? (
+                <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl space-y-2">
+                  <div className="font-semibold text-emerald-950 flex items-center justify-between">
+                    <span>Официальный Акт списания (DOCX):</span>
+                  </div>
+                  <p className="text-[11px] text-emerald-800">
+                    Вы можете скачать официальный акт списания на данную единицу оборудования в формате Word:
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleDownloadActForCurrentItem}
+                    className="w-full py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg font-bold flex items-center justify-center gap-1.5 shadow-xs transition-colors text-xs"
+                  >
+                    <Download className="w-4 h-4" />
+                    Скачать Акт списания (DOCX)
+                  </button>
                 </div>
-                <p className="text-[11px] text-emerald-800">
-                  Вы можете скачать официальный акт списания на данную единицу оборудования в формате Word:
-                </p>
-                <button
-                  type="button"
-                  onClick={handleDownloadActForCurrentItem}
-                  className="w-full py-2 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg font-bold flex items-center justify-center gap-1.5 shadow-xs transition-colors text-xs"
-                >
-                  <Download className="w-4 h-4" />
-                  Скачать Акт списания (DOCX)
-                </button>
-              </div>
+              ) : (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-[11px] text-slate-600">
+                  Оборудование не подходит ни под один из кейсов списания (проверьте категорию по
+                  бухучету и наличие ДМ) — его можно перевести в статус списания без формирования акта.
+                </div>
+              )}
 
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
                 <button
@@ -1385,6 +1539,40 @@ export const EquipmentDetailModal: React.FC<EquipmentDetailModalProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* Rollback Writeoff Confirmation Modal */}
+      {showRollbackConfirm && data && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="bg-white rounded-2xl shadow-xl border border-slate-200 max-w-sm w-full p-6 space-y-4">
+            <h3 className="font-bold text-base text-slate-900 flex items-center gap-2">
+              <RotateCcw className="w-5 h-5 text-amber-600" />
+              Откат списания
+            </h3>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Вы действительно хотите откатить списание для{' '}
+              <strong className="text-slate-900">«{data.name}»</strong>? Позиция будет убрана из
+              списка списания и снова станет доступна для редактирования, выдачи и инвентаризации.
+            </p>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowRollbackConfirm(false)}
+                disabled={rollbackLoading}
+                className="px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDetailRollback}
+                disabled={rollbackLoading}
+                className="px-4 py-2 text-xs font-bold bg-amber-600 hover:bg-amber-700 disabled:bg-amber-400 text-white rounded-xl shadow-xs"
+              >
+                {rollbackLoading ? 'Выполнение...' : 'Подтвердить откат'}
+              </button>
+            </div>
           </div>
         </div>
       )}

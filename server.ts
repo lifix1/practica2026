@@ -780,7 +780,7 @@ app.delete('/api/users/:id', requireAuth, requireRole('ADMIN'), async (req: Auth
 // ==========================================
 
 // Get Rooms
-app.get('/api/rooms', requireAuth, async (_req, res) => {
+app.get('/api/rooms', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
   try {
     const roomList = await db.select().from(rooms).orderBy(rooms.number);
     res.json(roomList);
@@ -880,7 +880,7 @@ app.delete('/api/rooms/:id', requireAuth, requireRole('ADMIN'), async (req, res)
 });
 
 // Get Equipment Types (hierarchical)
-app.get('/api/equipment-types', requireAuth, async (_req, res) => {
+app.get('/api/equipment-types', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
   try {
     const types = await db.select().from(equipmentTypes).orderBy(equipmentTypes.name);
     res.json(types);
@@ -1207,7 +1207,7 @@ app.delete('/api/equipment-types/:id', requireAuth, requireRole('ADMIN'), async 
 });
 
 // Get Additional Fields for a type (including inherited from parents)
-app.get('/api/equipment-types/:id/fields', requireAuth, async (req, res) => {
+app.get('/api/equipment-types/:id/fields', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req, res) => {
   try {
     const typeId = Number(req.params.id);
     if (!Number.isInteger(typeId) || typeId <= 0) {
@@ -1363,7 +1363,7 @@ async function findGlobalFieldCodeConflict(
 }
 
 // Global Additional Fields (present on all equipment types)
-app.get('/api/additional-fields/global', requireAuth, async (_req, res) => {
+app.get('/api/additional-fields/global', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
   try {
     const fields = await db
       .select()
@@ -1744,7 +1744,7 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
   try {
     const isRegularUser = req.user?.role === 'USER';
     const page = Math.max(1, Number(req.query.page) || 1);
-    const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 15));
+    const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 15));
     const offset = (page - 1) * limit;
 
     const search = req.query.search ? String(req.query.search).trim() : '';
@@ -1752,7 +1752,8 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
     const roomId = req.query.room_id ? Number(req.query.room_id) : undefined;
     const receivedFrom = req.query.received_from ? new Date(String(req.query.received_from)) : undefined;
     const receivedTo = req.query.received_to ? new Date(String(req.query.received_to)) : undefined;
-    const includeWrittenOff = !isRegularUser && req.query.include_written_off === 'true';
+    const onlyWriteoffs = !isRegularUser && req.query.only_writeoffs === 'true';
+    const includeWrittenOff = (!isRegularUser && req.query.include_written_off === 'true') || onlyWriteoffs;
     const writeoffState = !isRegularUser && req.query.writeoff_state ? String(req.query.writeoff_state) : undefined;
     const hasUnrepairedIssue = req.query.has_unrepaired_issue === 'true';
     const activeTransferOnly = !isRegularUser && req.query.active_transfer === 'true';
@@ -1803,6 +1804,16 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
       .$dynamic();
 
     const conditions: any[] = [];
+
+    if (isRegularUser) {
+      conditions.push(
+        sql`EXISTS (
+          SELECT 1 FROM equipment_issue ei
+          WHERE ei.equipment_id = ${equipment.id}
+            AND ei.reported_by_user_id = ${req.user!.id}
+        )`
+      );
+    }
 
     // Search filter across name, inventory number, DB ID, and opaque QR token
     if (search) {
@@ -1868,6 +1879,9 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
     }
 
     // Written-off filter
+    if (onlyWriteoffs) {
+      conditions.push(sql`${equipmentWriteoffs.state} IS NOT NULL`);
+    }
     if (writeoffState) {
       conditions.push(eq(equipmentWriteoffs.state, writeoffState as any));
     } else if (!includeWrittenOff) {
@@ -2121,11 +2135,29 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
       });
     }
 
+    if (onlyWriteoffs) {
+      filtered.sort((a: any, b: any) => {
+        const aWritten = a.writeoffState === 'WRITTEN_OFF';
+        const bWritten = b.writeoffState === 'WRITTEN_OFF';
+        if (aWritten !== bWritten) return aWritten ? 1 : -1;
+        if (aWritten && bWritten) {
+          const aTime = a.writeoffDate ? new Date(a.writeoffDate).getTime() : 0;
+          const bTime = b.writeoffDate ? new Date(b.writeoffDate).getTime() : 0;
+          const validA = Number.isFinite(aTime) ? aTime : 0;
+          const validB = Number.isFinite(bTime) ? bTime : 0;
+          if (validA !== validB) return validB - validA;
+        }
+        return Number(b.id) - Number(a.id);
+      });
+    }
+
     const total = filtered.length;
     const paginatedItems = filtered.slice(offset, offset + limit).map((item: any) => {
       if (!isRegularUser) return item;
       return {
         ...item,
+        initial_cost: null,
+        residual_cost: null,
         writeoffState: null,
         writeoffDate: null,
       };
@@ -2146,7 +2178,7 @@ app.get('/api/equipment', requireAuth, async (req: AuthRequest, res) => {
 
 // Download Department Excel Template matching accountant specification
 // Must be registered BEFORE /api/equipment/:id so Express doesn't treat 'excel-template' as :id
-app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
+app.get('/api/equipment/excel-template', requireAuth, requireRole('ADMIN'), (_req, res) => {
   try {
     const headers = [
       'Инвентарный номер',
@@ -2307,10 +2339,16 @@ app.get('/api/equipment/excel-template', requireAuth, (_req, res) => {
 
 // Export selected equipment rows (from Equipment or Writeoffs tables) to XLSX
 // Must be registered BEFORE /api/equipment/:id
-app.post('/api/equipment/export-excel', requireAuth, async (req: AuthRequest, res) => {
+app.post('/api/equipment/export-excel', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
   try {
     const rawIds = req.body?.equipment_ids;
     const source = req.body?.source === 'writeoff' ? 'writeoff' : 'equipment';
+
+    if (source === 'writeoff' && req.user?.role !== 'ADMIN') {
+      return res.status(403).json({
+        error: 'Экспорт таблицы списания доступен только администратору',
+      });
+    }
 
     if (!Array.isArray(rawIds) || rawIds.length === 0) {
       return res.status(400).json({ error: 'Выберите хотя бы одну строку для экспорта в Excel' });
@@ -2587,6 +2625,50 @@ app.post('/api/equipment/export-excel', requireAuth, async (req: AuthRequest, re
   }
 });
 
+// Helper: verify USER access to equipment (only if opened via valid opaque QR token OR user previously reported a breakdown on this item)
+async function hasUserAccessToEquipment(
+  userId: number,
+  role: string,
+  eqId: number,
+  qrTokenRaw?: unknown
+): Promise<{ allowed: boolean; viaQr: boolean }> {
+  if (role === 'ADMIN' || role === 'ENGINEER') {
+    return { allowed: true, viaQr: false };
+  }
+
+  const tokenStr = typeof qrTokenRaw === 'string' ? qrTokenRaw.trim() : '';
+  if (tokenStr) {
+    const decoded = decodeOpaqueQrToken(tokenStr);
+    if (decoded?.kind === 'equipment' && decoded.id === eqId) {
+      return { allowed: true, viaQr: true };
+    }
+    if (decoded?.kind === 'group') {
+      const [batch] = await db
+        .select({ equipment_ids: equipmentBatches.equipment_ids })
+        .from(equipmentBatches)
+        .where(eq(equipmentBatches.id, decoded.id))
+        .limit(1);
+      const ids = Array.isArray(batch?.equipment_ids) ? batch.equipment_ids : [];
+      if (ids.map(Number).includes(eqId)) {
+        return { allowed: true, viaQr: true };
+      }
+    }
+  }
+
+  const [existingIssue] = await db
+    .select({ id: equipmentIssues.id })
+    .from(equipmentIssues)
+    .where(
+      and(
+        eq(equipmentIssues.equipment_id, eqId),
+        eq(equipmentIssues.reported_by_user_id, userId)
+      )
+    )
+    .limit(1);
+
+  return { allowed: Boolean(existingIssue), viaQr: false };
+}
+
 // Resolve scanned QR URL / code / inventory number / ID directly on server (without 200-item client cap)
 // Must be registered BEFORE /api/equipment/:id
 app.get('/api/equipment/resolve/:code', requireAuth, async (req: AuthRequest, res) => {
@@ -2598,10 +2680,13 @@ app.get('/api/equipment/resolve/:code', requireAuth, async (req: AuthRequest, re
 
     if (rawCode.includes('/q/')) {
       rawCode = rawCode.split('/q/').pop()!.split('?')[0].split('#')[0].trim();
-    } else if (rawCode.includes('openEquipment=')) {
+    } else if (rawCode.includes('qr_token=')) {
+      const m = rawCode.match(/qr_token=([^&#]+)/i);
+      if (m) rawCode = decodeURIComponent(m[1]).trim();
+    } else if (rawCode.includes('openEquipment=') && req.user?.role !== 'USER') {
       const m = rawCode.match(/openEquipment=(\d+)/i);
       if (m) rawCode = m[1];
-    } else if (rawCode.includes('openGroup=')) {
+    } else if (rawCode.includes('openGroup=') && req.user?.role !== 'USER') {
       const m = rawCode.match(/openGroup=([^&#]+)/i);
       if (m) rawCode = decodeURIComponent(m[1]).trim();
     }
@@ -2621,7 +2706,7 @@ app.get('/api/equipment/resolve/:code', requireAuth, async (req: AuthRequest, re
           .limit(1);
 
         if (batch) {
-          return res.json({ kind: 'group', code: batch.code, name: batch.name });
+          return res.json({ kind: 'group', code: batch.code, name: batch.name, qrToken: rawCode });
         }
         return res.status(404).json({ error: 'Партия оборудования по данному QR-коду не найдена' });
       }
@@ -2638,9 +2723,17 @@ app.get('/api/equipment/resolve/:code', requireAuth, async (req: AuthRequest, re
           id: itemByToken.id,
           name: itemByToken.name,
           inventory_number: itemByToken.inventory_number,
+          qrToken: rawCode,
         });
       }
       return res.status(404).json({ error: 'Оборудование по данному QR-коду не найдено' });
+    }
+
+    // Strict QR-only access for USER role: cannot resolve by inventory number or DB ID
+    if (req.user?.role === 'USER') {
+      return res.status(403).json({
+        error: 'Пользователю доступен только поиск по отсканированному QR-коду оборудования',
+      });
     }
 
     if (/^(GRP|BATCH)-/i.test(rawCode)) {
@@ -2720,6 +2813,16 @@ app.get('/api/equipment/:id', async (req: AuthRequest, res, next) => {
 }, async (req: AuthRequest, res) => {
   try {
     const eqId = Number(req.params.id);
+    const isRegularUser = req.user?.role === 'USER';
+    const isEngineerUser = req.user?.role === 'ENGINEER';
+
+    const qrToken = req.query.qr_token || req.get('x-qr-token');
+    const access = await hasUserAccessToEquipment(req.user!.id, req.user!.role, eqId, qrToken);
+    if (!access.allowed) {
+      return res.status(403).json({
+        error: 'Нет доступа: пользователь может открывать оборудование только по сканированию QR-кода или по своим заявкам о поломке',
+      });
+    }
 
     const [item] = await db
       .select({
@@ -2749,15 +2852,21 @@ app.get('/api/equipment/:id', async (req: AuthRequest, res, next) => {
       return res.status(404).json({ error: 'Оборудование не найдено' });
     }
 
-    // Active issues
+    // Active issues (USER sees only their own reported issues)
     const activeIssues = await db
       .select()
       .from(equipmentIssues)
       .where(
-        and(
-          eq(equipmentIssues.equipment_id, eqId),
-          isNull(equipmentIssues.repaired_at)
-        )
+        isRegularUser
+          ? and(
+              eq(equipmentIssues.equipment_id, eqId),
+              eq(equipmentIssues.reported_by_user_id, req.user!.id),
+              isNull(equipmentIssues.repaired_at)
+            )
+          : and(
+              eq(equipmentIssues.equipment_id, eqId),
+              isNull(equipmentIssues.repaired_at)
+            )
       )
       .orderBy(desc(equipmentIssues.broken_at));
 
@@ -2810,19 +2919,22 @@ app.get('/api/equipment/:id', async (req: AuthRequest, res, next) => {
     // Field definitions
     const fieldsDefinitions = await getAllAdditionalFieldsForType(item.type_id);
 
-    // User privacy filter: USER does not see writeoff data
-    const isRegularUser = req.user?.role === 'USER';
+    // Writeoff data in detail modal is hidden for USER and ENGINEER (ENGINEER sees color status badge only on main list)
+    const hideWriteoffDetail = isRegularUser || isEngineerUser;
 
     res.json({
       ...item,
-      qrCode: encodeEquipmentQrToken(item.id),
+      initial_cost: isRegularUser ? null : item.initial_cost,
+      residual_cost: isRegularUser ? null : item.residual_cost,
+      qrCode: isRegularUser ? null : encodeEquipmentQrToken(item.id),
       additional_fields: computeDynamicWarranty(item.additional_fields),
-      writeoffState: isRegularUser ? null : item.writeoffState,
-      writeoffDate: isRegularUser ? null : item.writeoffDate,
+      writeoffState: hideWriteoffDetail ? null : item.writeoffState,
+      writeoffDate: hideWriteoffDetail ? null : item.writeoffDate,
       activeIssues,
       activeTransfer: isRegularUser ? null : activeTransfer || null,
       currentAuditVerification,
       fieldsDefinitions,
+      canReportIssue: isRegularUser ? access.viaQr : true,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -3462,7 +3574,7 @@ app.post('/api/equipment/qr-docx', requireAuth, requireRole('ADMIN', 'ENGINEER')
 });
 
 // Create Group QR Code for multiple items (e.g. tables, chairs)
-app.post('/api/equipment/qr-group', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
+app.post('/api/equipment/qr-group', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res) => {
   try {
     const { equipment_ids, name } = req.body;
     if (!Array.isArray(equipment_ids) || equipment_ids.length === 0) {
@@ -3534,6 +3646,7 @@ app.post('/api/equipment/qr-group', requireAuth, requireRole('ADMIN', 'ENGINEER'
 app.get('/api/equipment/qr-group/:code', requireAuth, async (req: AuthRequest, res) => {
   try {
     const code = req.params.code;
+    const isRegularUser = req.user?.role === 'USER';
     const [batch] = await db
       .select()
       .from(equipmentBatches)
@@ -3542,6 +3655,16 @@ app.get('/api/equipment/qr-group/:code', requireAuth, async (req: AuthRequest, r
 
     if (!batch) {
       return res.status(404).json({ error: 'Партия оборудования не найдена' });
+    }
+
+    if (isRegularUser) {
+      const qrToken = String(req.query.qr_token || req.get('x-qr-token') || '').trim();
+      const decoded = qrToken ? decodeOpaqueQrToken(qrToken) : null;
+      if (!decoded || decoded.kind !== 'group' || decoded.id !== batch.id) {
+        return res.status(403).json({
+          error: 'Пользователю доступен просмотр комплекта только по сканированию группового QR-кода',
+        });
+      }
     }
 
     const ids = Array.isArray(batch.equipment_ids) ? batch.equipment_ids : [];
@@ -3563,10 +3686,14 @@ app.get('/api/equipment/qr-group/:code', requireAuth, async (req: AuthRequest, r
           .where(inArray(equipment.id, ids))
       : [];
 
+    const safeItems = isRegularUser
+      ? items.map((it: any) => ({ ...it, initial_cost: null, residual_cost: null }))
+      : items;
+
     res.json({
       batch,
-      qrCode: encodeGroupQrToken(batch.id),
-      items,
+      qrCode: isRegularUser ? null : encodeGroupQrToken(batch.id),
+      items: safeItems,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -3733,7 +3860,10 @@ app.get('/q/:code', optionalAuth, async (req: AuthRequest, res) => {
           .where(eq(equipmentBatches.id, decodedOpaque.id))
           .limit(1);
         if (batch) {
-          return res.redirect(302, `/?openGroup=${encodeURIComponent(batch.code)}`);
+          return res.redirect(
+            302,
+            `/?openGroup=${encodeURIComponent(batch.code)}&qr_token=${encodeURIComponent(rawCode)}`
+          );
         }
       } else {
         const [itemByToken] = await db
@@ -3742,12 +3872,31 @@ app.get('/q/:code', optionalAuth, async (req: AuthRequest, res) => {
           .where(eq(equipment.id, decodedOpaque.id))
           .limit(1);
         if (itemByToken) {
-          return res.redirect(302, `/?openEquipment=${itemByToken.id}`);
+          return res.redirect(
+            302,
+            `/?openEquipment=${itemByToken.id}&qr_token=${encodeURIComponent(rawCode)}`
+          );
         }
       }
     }
 
-    // 3. Authorized user: Legacy Group batch code
+    // Strict QR-only gateway for USER role (no numeric ID, inventory number, or batch code guessing)
+    if (req.user.role === 'USER') {
+      return res.status(404).type('text/html').send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="robots" content="noindex, nofollow">
+  <title>404 Not Found</title>
+</head>
+<body>
+  <h1>404 Not Found</h1>
+  <p>The requested URL was not found on this server.</p>
+</body>
+</html>`);
+    }
+
+    // 3. Authorized staff: Legacy Group batch code
     if (rawCode.startsWith('GRP-') || rawCode.startsWith('grp-') || rawCode.startsWith('BATCH-')) {
       const [batch] = await db
         .select()
@@ -4394,7 +4543,7 @@ app.post('/api/equipment/import-excel', requireAuth, requireRole('ADMIN'), async
 // Update Writeoff Status (single or bulk)
 // Spec (PDF page 10): "Для каждого оборудования у Администратора должна быть возможность выставить один из следующих статусов - Готовится к списанию (PREPARING), В процессе списания (DOCUMENTS_PREPARATION), Списано (WRITEOFF).
 // Статусы можно менять как для одного оборудования в окне с информацией об оборудовании, так и для нескольких сразу - выбрав их из списка оборудования."
-app.post('/api/writeoff/update-status', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req, res) => {
+app.post('/api/writeoff/update-status', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
     const { equipment_ids, state, writeoff_date } = req.body;
     if (!Array.isArray(equipment_ids) || equipment_ids.length === 0 || !state) {
@@ -4412,13 +4561,42 @@ app.post('/api/writeoff/update-status', requireAuth, requireRole('ADMIN', 'ENGIN
       return res.status(400).json({ error: 'Некорректные идентификаторы оборудования' });
     }
 
+    const targetRows = await db
+      .select({
+        id: equipment.id,
+        name: equipment.name,
+        inventory_number: equipment.inventory_number,
+      })
+      .from(equipment)
+      .where(inArray(equipment.id, validIds));
+
+    if (targetRows.length === 0) {
+      return res.status(404).json({ error: 'Выбранное оборудование не найдено в базе данных' });
+    }
+
+    const noInvItems = targetRows.filter(
+      (r: any) => !r.inventory_number || !String(r.inventory_number).trim()
+    );
+    if (noInvItems.length > 0) {
+      const namesPreview = noInvItems
+        .slice(0, 3)
+        .map((x: any) => `«${x.name}»`)
+        .join(', ');
+      const suffix = noInvItems.length > 3 ? ` и ещё ${noInvItems.length - 3} поз.` : '';
+      return res.status(400).json({
+        error: `Оборудование без инвентарного номера (${namesPreview}${suffix}) не находится на балансе и не подлежит списанию — его можно только удалить из базы данных.`,
+      });
+    }
+
+    const existingIds = targetRows.map((r: any) => Number(r.id));
+
     const parsedDate = writeoff_date ? new Date(writeoff_date) : new Date();
     if (state === 'WRITTEN_OFF' && isNaN(parsedDate.getTime())) {
       return res.status(400).json({ error: 'Некорректная дата списания' });
     }
     const date = state === 'WRITTEN_OFF' ? parsedDate : null;
 
-    for (const eqId of validIds) {
+    for (const eqId of existingIds) {
       await db
         .insert(equipmentWriteoffs)
         .values({
@@ -4441,13 +4619,95 @@ app.post('/api/writeoff/update-status', requireAuth, requireRole('ADMIN', 'ENGIN
       category: 'WRITEOFF',
       severity: state === 'WRITTEN_OFF' ? 'CRITICAL' : 'WARNING',
       entityType: 'equipment',
-      entityId: validIds.join(','),
-      entityLabel: `Статус списания → ${state} (${validIds.length} ед.)`,
-      summary: `Изменён статус списания на ${state} для ${validIds.length} ед. оборудования`,
-      details: { state, equipmentIds: validIds, writeoffDate: date },
+      entityId: existingIds.join(','),
+      entityLabel: `Статус списания → ${state} (${existingIds.length} ед.)`,
+      summary: `Изменён статус списания на ${state} для ${existingIds.length} ед. оборудования`,
+      details: { state, equipmentIds: existingIds, writeoffDate: date },
     });
 
-    res.json({ success: true, count: validIds.length });
+    res.json({ success: true, count: existingIds.length });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Rollback Writeoff Status (Admin only: removes writeoff status or steps back to preparation stage)
+app.post('/api/writeoff/rollback', requireAuth, requireRole('ADMIN'), async (req, res) => {
+  try {
+    const { equipment_ids, target_state } = req.body;
+    if (!Array.isArray(equipment_ids) || equipment_ids.length === 0) {
+      return res.status(400).json({ error: 'Выберите оборудование для отката списания' });
+    }
+
+    const validIds = equipment_ids
+      .map((id: any) => Number(id))
+      .filter((id: number) => Number.isInteger(id) && id > 0);
+    if (validIds.length === 0) {
+      return res.status(400).json({ error: 'Некорректные идентификаторы оборудования' });
+    }
+
+    const nextState: 'NONE' | 'PREPARING' | 'DOCUMENTS_PREPARATION' =
+      target_state === 'PREPARING' || target_state === 'DOCUMENTS_PREPARATION'
+        ? target_state
+        : 'NONE';
+
+    const existingWriteoffs = await db
+      .select({
+        equipmentId: equipmentWriteoffs.equipment_id,
+        previousState: equipmentWriteoffs.state,
+        name: equipment.name,
+        inventoryNumber: equipment.inventory_number,
+      })
+      .from(equipmentWriteoffs)
+      .innerJoin(equipment, eq(equipmentWriteoffs.equipment_id, equipment.id))
+      .where(inArray(equipmentWriteoffs.equipment_id, validIds));
+
+    if (existingWriteoffs.length === 0) {
+      return res.status(404).json({ error: 'Выбранное оборудование не находится в списке списания' });
+    }
+
+    const affectedIds = existingWriteoffs.map((r: any) => Number(r.equipmentId));
+
+    if (nextState === 'NONE') {
+      await db
+        .delete(equipmentWriteoffs)
+        .where(inArray(equipmentWriteoffs.equipment_id, affectedIds));
+    } else {
+      await db
+        .update(equipmentWriteoffs)
+        .set({
+          state: nextState,
+          writeoff_date: null,
+        })
+        .where(inArray(equipmentWriteoffs.equipment_id, affectedIds));
+    }
+
+    await logAuditEvent({
+      req,
+      action: 'WRITEOFF_ROLLBACK',
+      category: 'WRITEOFF',
+      severity: 'WARNING',
+      entityType: 'equipment',
+      entityId: affectedIds.join(','),
+      entityLabel:
+        nextState === 'NONE'
+          ? `Откат списания (${affectedIds.length} ед.) → активный учёт`
+          : `Откат списания (${affectedIds.length} ед.) → ${nextState}`,
+      summary:
+        nextState === 'NONE'
+          ? `Выполнен откат списания для ${affectedIds.length} ед. оборудования (возврат в основной список)`
+          : `Выполнен откат списания для ${affectedIds.length} ед. оборудования на этап ${nextState}`,
+      details: {
+        targetState: nextState,
+        equipmentIds: affectedIds,
+        previousStates: existingWriteoffs.map((r: any) => ({
+          id: r.equipmentId,
+          previousState: r.previousState,
+        })),
+      },
+    });
+
+    res.json({ success: true, count: affectedIds.length, targetState: nextState });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -4462,7 +4722,7 @@ async function getWriteoffTemplateMap(): Promise<Record<WriteoffTemplateKey, Loa
 }
 
 // List all Writeoff Act & Invoice Templates + Requisites
-app.get('/api/writeoff/templates', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
+app.get('/api/writeoff/templates', requireAuth, requireRole('ADMIN'), async (_req, res) => {
   try {
     const list = await getAllWriteoffTemplates();
     res.json({
@@ -4475,7 +4735,7 @@ app.get('/api/writeoff/templates', requireAuth, requireRole('ADMIN', 'ENGINEER')
 });
 
 // Update structured requisites (Order №, Dates, Officials, Commission, MOL) for a template
-app.put('/api/writeoff/templates/:key/requisites', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
+app.put('/api/writeoff/templates/:key/requisites', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res) => {
   try {
     const { key } = req.params;
     if (!isValidWriteoffTemplateKey(key)) {
@@ -4512,7 +4772,7 @@ app.put('/api/writeoff/templates/:key/requisites', requireAuth, requireRole('ADM
 });
 
 // Download editable .docx template (either currently uploaded custom .docx or generated editable template with placeholders)
-app.get('/api/writeoff/templates/:key/download', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req, res) => {
+app.get('/api/writeoff/templates/:key/download', requireAuth, requireRole('ADMIN'), async (req, res) => {
   try {
     const { key } = req.params;
     if (!isValidWriteoffTemplateKey(key)) {
@@ -4545,7 +4805,7 @@ app.get('/api/writeoff/templates/:key/download', requireAuth, requireRole('ADMIN
 });
 
 // Upload edited .docx template file (stored persistently in PostgreSQL)
-app.post('/api/writeoff/templates/:key/upload', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
+app.post('/api/writeoff/templates/:key/upload', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res) => {
   try {
     const { key } = req.params;
     if (!isValidWriteoffTemplateKey(key)) {
@@ -4596,7 +4856,7 @@ app.post('/api/writeoff/templates/:key/upload', requireAuth, requireRole('ADMIN'
 });
 
 // Remove custom .docx template and revert to built-in generator
-app.delete('/api/writeoff/templates/:key/custom-docx', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
+app.delete('/api/writeoff/templates/:key/custom-docx', requireAuth, requireRole('ADMIN'), async (req: AuthRequest, res) => {
   try {
     const { key } = req.params;
     if (!isValidWriteoffTemplateKey(key)) {
@@ -4627,7 +4887,7 @@ app.delete('/api/writeoff/templates/:key/custom-docx', requireAuth, requireRole(
 });
 
 // Download Sample Writeoff Act DOCX (Case 1 example matching accounting template)
-app.get('/api/writeoff/sample-act', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
+app.get('/api/writeoff/sample-act', requireAuth, requireRole('ADMIN'), async (_req, res) => {
   try {
     const sampleItems = [
       {
@@ -4674,7 +4934,7 @@ app.get('/api/writeoff/sample-act', requireAuth, requireRole('ADMIN', 'ENGINEER'
 });
 
 // Download Sample Transfer Invoice DOCX (ОКУД 0501460 — example with kit components)
-app.get('/api/writeoff/sample-invoice', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
+app.get('/api/writeoff/sample-invoice', requireAuth, requireRole('ADMIN'), async (_req, res) => {
   try {
     const sampleItems = [
       {
@@ -4753,7 +5013,7 @@ app.get('/api/writeoff/sample-invoice', requireAuth, requireRole('ADMIN', 'ENGIN
 });
 
 // Download Sample Writeoff Act DOCX (Case 2: Малоценка с ДМ)
-app.get('/api/writeoff/sample-act-case2', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
+app.get('/api/writeoff/sample-act-case2', requireAuth, requireRole('ADMIN'), async (_req, res) => {
   try {
     const sampleItems = [
       {
@@ -4800,7 +5060,7 @@ app.get('/api/writeoff/sample-act-case2', requireAuth, requireRole('ADMIN', 'ENG
 });
 
 // Download Sample Form 434 Invoice DOCX (Case 2: Малоценка)
-app.get('/api/writeoff/sample-invoice-case2', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
+app.get('/api/writeoff/sample-invoice-case2', requireAuth, requireRole('ADMIN'), async (_req, res) => {
   try {
     const sampleItems = [
       {
@@ -4878,7 +5138,7 @@ app.get('/api/writeoff/sample-invoice-case2', requireAuth, requireRole('ADMIN', 
 });
 
 // Download Sample Writeoff Act DOCX (Case 3: Малоценка без ДМ)
-app.get('/api/writeoff/sample-act-case3', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (_req, res) => {
+app.get('/api/writeoff/sample-act-case3', requireAuth, requireRole('ADMIN'), async (_req, res) => {
   try {
     const sampleItems = [
       {
@@ -5019,21 +5279,31 @@ async function handleGenerateActRequest(req: any, res: any) {
       recivedRaw: i.recived,
     }));
 
+    const balanceItems = formatted.filter((i: any) =>
+      Boolean(i.inventory_number && String(i.inventory_number).trim())
+    );
+    if (balanceItems.length === 0) {
+      return res.status(400).json({
+        error:
+          'Оборудование без инвентарного номера (не находится на балансе) не подлежит списанию и не имеет акта — его можно только удалить из базы.',
+      });
+    }
+
     const templatesMap = await getWriteoffTemplateMap();
 
     let buffer: Buffer;
     let resolvedCaseLabel: string;
     let asciiFilename: string;
-    let exportedItems = formatted;
+    let exportedItems = balanceItems;
     const dateTag = new Date().toISOString().slice(0, 10);
 
     if (caseTypeParam === 'case1' || caseTypeParam === 'case2' || caseTypeParam === 'case3') {
       resolvedCaseLabel = caseTypeParam;
       buffer = await renderWriteoffActsFromTemplates(
         {
-          case1: caseTypeParam === 'case1' ? formatted : [],
-          case2: caseTypeParam === 'case2' ? formatted : [],
-          case3: caseTypeParam === 'case3' ? formatted : [],
+          case1: caseTypeParam === 'case1' ? balanceItems : [],
+          case2: caseTypeParam === 'case2' ? balanceItems : [],
+          case3: caseTypeParam === 'case3' ? balanceItems : [],
         },
         templatesMap,
         String(actNumberParam || ''),
@@ -5051,17 +5321,17 @@ async function handleGenerateActRequest(req: any, res: any) {
       );
       asciiFilename =
         caseTypeParam === 'case3'
-          ? `akt-malotsenka-bez-dm-${formatted.length}-poz-${dateTag}.docx`
+          ? `akt-malotsenka-bez-dm-${balanceItems.length}-poz-${dateTag}.docx`
           : caseTypeParam === 'case2'
-          ? `akt-malotsenka-dm-${formatted.length}-ed-${dateTag}.docx`
-          : `akt-spisaniya-${formatted.length}-ed-${dateTag}.docx`;
+          ? `akt-malotsenka-dm-${balanceItems.length}-ed-${dateTag}.docx`
+          : `akt-spisaniya-${balanceItems.length}-ed-${dateTag}.docx`;
     } else {
       // Auto mode: detect each item's own writeoff case independently and skip items without a case (OTHER)
       const case1Items: any[] = [];
       const case2Items: any[] = [];
       const case3Items: any[] = [];
 
-      for (const item of formatted) {
+      for (const item of balanceItems) {
         const c = detectEquipmentWriteoffCase(item);
         if (c === 'case1') case1Items.push(item);
         else if (c === 'case2') case2Items.push(item);
@@ -5071,7 +5341,7 @@ async function handleGenerateActRequest(req: any, res: any) {
       exportedItems = [...case1Items, ...case2Items, ...case3Items];
       if (exportedItems.length === 0) {
         return res.status(400).json({
-          error: 'Для выбранного оборудования нет кейса списания — документы не формируются.',
+          error: 'Для выбранного оборудования нет кейса списания — акт списания не формируется.',
         });
       }
 
@@ -5139,9 +5409,9 @@ async function handleGenerateActRequest(req: any, res: any) {
   }
 }
 
-app.post('/api/writeoff/generate-act', requireAuth, requireRole('ADMIN', 'ENGINEER'), handleGenerateActRequest);
-app.get('/api/writeoff/generate-act', requireAuth, requireRole('ADMIN', 'ENGINEER'), handleGenerateActRequest);
-app.get('/api/writeoff/act/:id', requireAuth, requireRole('ADMIN', 'ENGINEER'), handleGenerateActRequest);
+app.post('/api/writeoff/generate-act', requireAuth, requireRole('ADMIN'), handleGenerateActRequest);
+app.get('/api/writeoff/generate-act', requireAuth, requireRole('ADMIN'), handleGenerateActRequest);
+app.get('/api/writeoff/act/:id', requireAuth, requireRole('ADMIN'), handleGenerateActRequest);
 
 // Generate Transfer Invoice DOCX (Supports Case 1: ОКУД 0501460 & Case 2: Форма 434; Case 3 has NO invoice)
 async function handleGenerateInvoiceRequest(req: any, res: any) {
@@ -5204,19 +5474,29 @@ async function handleGenerateInvoiceRequest(req: any, res: any) {
       recivedRaw: i.recived,
     }));
 
+    const balanceItems = formatted.filter((i: any) =>
+      Boolean(i.inventory_number && String(i.inventory_number).trim())
+    );
+    if (balanceItems.length === 0) {
+      return res.status(400).json({
+        error:
+          'Оборудование без инвентарного номера (не находится на балансе) не подлежит списанию и накладная на него не оформляется.',
+      });
+    }
+
     const templatesMap = await getWriteoffTemplateMap();
 
     let buffer: Buffer;
     let asciiFilename: string;
-    let exportedCount = formatted.length;
+    let exportedCount = balanceItems.length;
     const dateTag = new Date().toISOString().slice(0, 10);
 
     if (caseTypeParam === 'case1' || caseTypeParam === 'case2') {
       const isLowValue = caseTypeParam === 'case2';
       buffer = await renderInvoicesFromTemplates(
         {
-          case1: isLowValue ? [] : formatted,
-          case2: isLowValue ? formatted : [],
+          case1: isLowValue ? [] : balanceItems,
+          case2: isLowValue ? balanceItems : [],
         },
         templatesMap,
         {
@@ -5233,7 +5513,7 @@ async function handleGenerateInvoiceRequest(req: any, res: any) {
     } else {
       const case1Items: any[] = [];
       const case2Items: any[] = [];
-      for (const item of formatted) {
+      for (const item of balanceItems) {
         const c = detectEquipmentWriteoffCase(item);
         if (c === 'case1') case1Items.push(item);
         else if (c === 'case2') case2Items.push(item);
@@ -5294,8 +5574,8 @@ async function handleGenerateInvoiceRequest(req: any, res: any) {
   }
 }
 
-app.post('/api/writeoff/generate-invoice', requireAuth, requireRole('ADMIN', 'ENGINEER'), handleGenerateInvoiceRequest);
-app.get('/api/writeoff/generate-invoice', requireAuth, requireRole('ADMIN', 'ENGINEER'), handleGenerateInvoiceRequest);
+app.post('/api/writeoff/generate-invoice', requireAuth, requireRole('ADMIN'), handleGenerateInvoiceRequest);
+app.get('/api/writeoff/generate-invoice', requireAuth, requireRole('ADMIN'), handleGenerateInvoiceRequest);
 
 // ==========================================
 // 7. ISSUE TRACKING & NOTIFICATIONS
@@ -5313,6 +5593,17 @@ app.post('/api/equipment/:id/issues', requireAuth, async (req: AuthRequest, res)
       return res.status(400).json({ error: 'Некорректный идентификатор оборудования' });
     }
     const { state, description, broken_at } = req.body;
+
+    // USER role can ONLY report breakdown via a valid scanned QR token
+    if (req.user?.role === 'USER') {
+      const qrToken = req.body?.qr_token || req.query.qr_token || req.get('x-qr-token');
+      const access = await hasUserAccessToEquipment(req.user.id, req.user.role, eqId, qrToken);
+      if (!access.viaQr) {
+        return res.status(403).json({
+          error: 'Пользователь может отправить сообщение о поломке только после сканирования QR-кода оборудования',
+        });
+      }
+    }
 
     if (!state || !description || !String(description).trim()) {
       return res.status(400).json({ error: 'Характер неисправности и описание обязательны' });
@@ -5355,6 +5646,7 @@ app.post('/api/equipment/:id/issues', requireAuth, async (req: AuthRequest, res)
       .insert(equipmentIssues)
       .values({
         equipment_id: eqId,
+        reported_by_user_id: req.user!.id,
         state: state as any,
         description: String(description).trim(),
         broken_at: brokenDate,
@@ -5467,16 +5759,31 @@ app.post('/api/issues/batch', requireAuth, requireRole('ADMIN', 'ENGINEER'), asy
 });
 
 // Issues History for single equipment (Chronological order, page 12)
-app.get('/api/equipment/:id/issues', requireAuth, async (req, res) => {
+app.get('/api/equipment/:id/issues', requireAuth, async (req: AuthRequest, res) => {
   try {
     const eqId = Number(req.params.id);
     if (!Number.isInteger(eqId) || eqId <= 0) {
       return res.status(400).json({ error: 'Некорректный идентификатор оборудования' });
     }
+    const qrToken = req.query.qr_token || req.get('x-qr-token');
+    const access = await hasUserAccessToEquipment(req.user!.id, req.user!.role, eqId, qrToken);
+    if (!access.allowed) {
+      return res.status(403).json({
+        error: 'Нет доступа к истории неисправностей данного оборудования',
+      });
+    }
+    const isRegularUser = req.user!.role === 'USER';
     const history = await db
       .select()
       .from(equipmentIssues)
-      .where(eq(equipmentIssues.equipment_id, eqId))
+      .where(
+        isRegularUser
+          ? and(
+              eq(equipmentIssues.equipment_id, eqId),
+              eq(equipmentIssues.reported_by_user_id, req.user!.id)
+            )
+          : eq(equipmentIssues.equipment_id, eqId)
+      )
       .orderBy(desc(equipmentIssues.broken_at));
     res.json(history);
   } catch (error: any) {
@@ -5539,7 +5846,7 @@ app.post('/api/issues/:issueId/repair', requireAuth, requireRole('ADMIN', 'ENGIN
 });
 
 // Notifications for current user
-app.get('/api/notifications', requireAuth, async (req: AuthRequest, res) => {
+app.get('/api/notifications', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
   try {
     if (!req.user) return res.json([]);
 
@@ -5573,7 +5880,7 @@ app.get('/api/notifications', requireAuth, async (req: AuthRequest, res) => {
 
 // Dismiss notification
 // Spec (PDF page 14): "После просмотра уведомления записи из таблицы удаляются."
-app.delete('/api/notifications/:id', requireAuth, async (req: AuthRequest, res) => {
+app.delete('/api/notifications/:id', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
   try {
     const notifId = Number(req.params.id);
     if (!Number.isInteger(notifId) || notifId <= 0) {
@@ -5604,12 +5911,41 @@ app.post('/api/equipment/transfers', requireAuth, requireRole('ADMIN', 'ENGINEER
     }
 
     const transferDate = issued_at ? new Date(issued_at) : new Date();
-    const expectedReturnDate = expected_return_at ? new Date(expected_return_at) : null;
     if (isNaN(transferDate.getTime())) {
       return res.status(400).json({ error: 'Некорректная дата передачи оборудования' });
     }
-    if (expectedReturnDate && isNaN(expectedReturnDate.getTime())) {
-      return res.status(400).json({ error: 'Некорректная планируемая дата возврата' });
+
+    const formatLocalYmd = (date: Date) => {
+      const y = date.getFullYear();
+      const m = String(date.getMonth() + 1).padStart(2, '0');
+      const d = String(date.getDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    };
+    const toCalendarYmd = (raw: unknown, parsed: Date) => {
+      if (typeof raw === 'string') {
+        const match = raw.trim().match(/^(\d{4}-\d{2}-\d{2})$/);
+        if (match) return match[1];
+      }
+      return formatLocalYmd(parsed);
+    };
+
+    let expectedReturnDate: Date | null = null;
+    if (expected_return_at !== undefined && expected_return_at !== null && String(expected_return_at).trim() !== '') {
+      const rawExpected = String(expected_return_at).trim();
+      const ymdMatch = rawExpected.match(/^(\d{4}-\d{2}-\d{2})$/);
+      expectedReturnDate = ymdMatch ? new Date(`${ymdMatch[1]}T12:00:00.000Z`) : new Date(rawExpected);
+      if (isNaN(expectedReturnDate.getTime())) {
+        return res.status(400).json({ error: 'Некорректная планируемая дата возврата' });
+      }
+
+      const expectedYmd = ymdMatch ? ymdMatch[1] : formatLocalYmd(expectedReturnDate);
+      const transferYmd = toCalendarYmd(issued_at, transferDate);
+      const todayYmd = formatLocalYmd(new Date());
+      if (expectedYmd < transferYmd || expectedYmd < todayYmd) {
+        return res.status(400).json({
+          error: 'Предполагаемая дата возврата не может быть задана задним числом (раньше текущей даты)',
+        });
+      }
     }
     const errors: string[] = [];
 
@@ -5846,18 +6182,15 @@ app.post('/api/inventory/start', requireAuth, requireRole('ADMIN', 'ENGINEER'), 
 });
 
 // Get Current Active Inventory for User (Auditor)
-app.get('/api/inventory/current', requireAuth, async (req: AuthRequest, res) => {
+app.get('/api/inventory/current', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
   try {
-    if (!req.user || !['ADMIN', 'ENGINEER'].includes(req.user.role)) {
-      return res.json({ activeInventory: null });
-    }
 
     const [active] = await db
       .select()
       .from(inventories)
       .where(
         and(
-          eq(inventories.auditor_ext_id, req.user.id),
+          eq(inventories.auditor_ext_id, req.user!.id),
           isNull(inventories.finished_at)
         )
       )
@@ -6109,9 +6442,12 @@ function buildRoleScopedAuditFilter(user: NonNullable<AuthRequest['user']>) {
     return null;
   }
   if (user.role === 'ENGINEER') {
-    return or(
-      inArray(auditLogs.category, ENGINEER_ALLOWED_CATEGORIES),
-      and(eq(auditLogs.category, 'AUTH'), eq(auditLogs.actor_id, user.id))
+    return and(
+      or(
+        inArray(auditLogs.category, ENGINEER_ALLOWED_CATEGORIES),
+        and(eq(auditLogs.category, 'AUTH'), eq(auditLogs.actor_id, user.id))
+      ),
+      sql`${auditLogs.action} NOT LIKE 'WRITEOFF_%'`
     );
   }
   // USER: strictly own activity logs
@@ -6119,13 +6455,13 @@ function buildRoleScopedAuditFilter(user: NonNullable<AuthRequest['user']>) {
 }
 
 // Get current user's logging role capabilities
-app.get('/api/audit-logs/capabilities', requireAuth, async (req: AuthRequest, res) => {
+app.get('/api/audit-logs/capabilities', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
   const user = req.user!;
   res.json(getRoleLogCapabilities(user.role));
 });
 
 // Query audit logs strictly scoped to user role capabilities
-app.get('/api/audit-logs', requireAuth, async (req: AuthRequest, res) => {
+app.get('/api/audit-logs', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
   try {
     const user = req.user!;
     const capabilities = getRoleLogCapabilities(user.role);
@@ -6238,7 +6574,7 @@ app.get('/api/audit-logs', requireAuth, async (req: AuthRequest, res) => {
 });
 
 // Export audit logs (ADMIN: all visible logs; ENGINEER: operational logs only; USER: 403)
-app.get('/api/audit-logs/export', requireAuth, async (req: AuthRequest, res) => {
+app.get('/api/audit-logs/export', requireAuth, requireRole('ADMIN', 'ENGINEER'), async (req: AuthRequest, res) => {
   try {
     const user = req.user!;
     const capabilities = getRoleLogCapabilities(user.role);

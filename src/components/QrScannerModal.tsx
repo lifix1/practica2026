@@ -1,22 +1,25 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { X, Camera, Upload, Search, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
 import jsQR from 'jsqr';
-import type { Equipment } from '../types/index.ts';
+import type { Equipment, User } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
 
 interface QrScannerModalProps {
   isOpen: boolean;
+  currentUser?: User | null;
   onClose: () => void;
-  onSelectEquipmentId: (id: number) => void;
-  onSelectGroupCode?: (code: string) => void;
+  onSelectEquipmentId: (id: number, qrToken?: string) => void;
+  onSelectGroupCode?: (code: string, qrToken?: string) => void;
 }
 
 export const QrScannerModal: React.FC<QrScannerModalProps> = ({
   isOpen,
+  currentUser,
   onClose,
   onSelectEquipmentId,
   onSelectGroupCode,
 }) => {
+  const isRegularUser = currentUser?.role === 'USER';
   const [equipmentList, setEquipmentList] = useState<Equipment[]>([]);
   const [manualInput, setManualInput] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -30,16 +33,20 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
   const animationFrameRef = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Load first few equipment items for quick jump list on open
+  // Load first few equipment items for quick jump list on open (Staff only)
   useEffect(() => {
     if (isOpen) {
-      apiFetch('/api/equipment?limit=15')
-        .then((r) => r.json())
-        .then((data) => {
-          if (Array.isArray(data?.items)) setEquipmentList(data.items);
-          else setEquipmentList([]);
-        })
-        .catch(console.error);
+      if (!isRegularUser) {
+        apiFetch('/api/equipment?limit=15')
+          .then((r) => r.json())
+          .then((data) => {
+            if (Array.isArray(data?.items)) setEquipmentList(data.items);
+            else setEquipmentList([]);
+          })
+          .catch(console.error);
+      } else {
+        setEquipmentList([]);
+      }
     } else {
       stopCamera();
       setError(null);
@@ -47,7 +54,7 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
       setResolving(false);
       setManualInput('');
     }
-  }, [isOpen]);
+  }, [isOpen, isRegularUser]);
 
   // Clean up camera when unmounting
   useEffect(() => {
@@ -88,21 +95,30 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
       const res = await apiFetch(`/api/equipment/resolve/${encodeURIComponent(raw)}`);
       if (res.ok) {
         const resolved = await res.json();
+        const resolvedToken = resolved.qrToken || raw;
         if (resolved.kind === 'group' && resolved.code && onSelectGroupCode) {
           stopCamera();
-          onSelectGroupCode(resolved.code);
+          onSelectGroupCode(resolved.code, resolvedToken);
           onClose();
           return true;
         }
         if (resolved.kind === 'equipment' && resolved.id) {
           stopCamera();
-          onSelectEquipmentId(Number(resolved.id));
+          onSelectEquipmentId(Number(resolved.id), resolvedToken);
           onClose();
           return true;
         }
+      } else if (isRegularUser) {
+        const errData = await res.json().catch(() => ({}));
+        setError(errData.error || 'Недействительный QR-код оборудования');
+        return false;
       }
 
-      // Fallback search by name/partial inventory number across server DB
+      if (isRegularUser) {
+        return false;
+      }
+
+      // Fallback search by name/partial inventory number across server DB (Staff only)
       const searchRes = await apiFetch(`/api/equipment?search=${encodeURIComponent(raw)}&limit=10`);
       if (searchRes.ok) {
         const searchData = await searchRes.json();
@@ -416,7 +432,9 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
           {/* Manual Input or Search */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-              Или вставьте код из QR-сканера телефона, инвентарный номер или ID:
+              {isRegularUser
+                ? 'Или вставьте код / ссылку из QR-сканера:'
+                : 'Или вставьте код из QR-сканера телефона, инвентарный номер или ID:'}
             </label>
             <div className="flex gap-2">
               <div className="relative flex-1">
@@ -426,7 +444,11 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
                   value={manualInput}
                   onChange={(e) => setManualInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleManualSearch()}
-                  placeholder="Код из QR (18 символов), INV-2026-001 или ID"
+                  placeholder={
+                    isRegularUser
+                      ? 'Код из QR-этикетки (или URL /q/...)'
+                      : 'Код из QR (18 символов), INV-2026-001 или ID'
+                  }
                   className="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
                 />
               </div>
@@ -436,44 +458,46 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
                 disabled={resolving || !manualInput.trim()}
                 className="px-4 py-2 bg-slate-800 hover:bg-slate-900 disabled:opacity-50 text-white text-xs font-semibold rounded-xl transition-colors cursor-pointer"
               >
-                {resolving ? 'Поиск...' : 'Найти'}
+                {resolving ? 'Поиск...' : isRegularUser ? 'Открыть' : 'Найти'}
               </button>
             </div>
           </div>
 
-          {/* Quick Jump List */}
-          <div>
-            <span className="block text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wider">
-              Быстрый переход к оборудованию кафедры:
-            </span>
-            {equipmentList.length === 0 ? (
-              <div className="p-3 rounded-xl border border-dashed border-slate-200 text-center text-xs text-slate-400">
-                В реестре пока нет зарегистрированного оборудования
-              </div>
-            ) : (
-              <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
-                {equipmentList.slice(0, 6).map((item) => (
-                  <button
-                    key={item.id}
-                    onClick={() => handleSelectPredefined(item.id)}
-                    className="w-full flex items-center justify-between p-2.5 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/50 transition-all text-left text-xs cursor-pointer"
-                  >
-                    <div className="flex items-center gap-2 truncate">
-                      <span className="font-mono font-bold bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-[11px] tabular-nums">
-                        {item.inventory_number || 'б/н'}
+          {/* Quick Jump List (Staff only) */}
+          {!isRegularUser && (
+            <div>
+              <span className="block text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wider">
+                Быстрый переход к оборудованию кафедры:
+              </span>
+              {equipmentList.length === 0 ? (
+                <div className="p-3 rounded-xl border border-dashed border-slate-200 text-center text-xs text-slate-400">
+                  В реестре пока нет зарегистрированного оборудования
+                </div>
+              ) : (
+                <div className="space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                  {equipmentList.slice(0, 6).map((item) => (
+                    <button
+                      key={item.id}
+                      onClick={() => handleSelectPredefined(item.id)}
+                      className="w-full flex items-center justify-between p-2.5 rounded-xl border border-slate-200 hover:border-indigo-300 hover:bg-indigo-50/50 transition-all text-left text-xs cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2 truncate">
+                        <span className="font-mono font-bold bg-slate-100 text-slate-800 px-1.5 py-0.5 rounded text-[11px] tabular-nums">
+                          {item.inventory_number || 'б/н'}
+                        </span>
+                        <span className="font-medium text-slate-900 truncate">
+                          {item.name}
+                        </span>
+                      </div>
+                      <span className="text-[11px] text-slate-500 shrink-0 tabular-nums">
+                        {item.roomNumber ? `каб. ${item.roomNumber}` : 'без каб.'}
                       </span>
-                      <span className="font-medium text-slate-900 truncate">
-                        {item.name}
-                      </span>
-                    </div>
-                    <span className="text-[11px] text-slate-500 shrink-0 tabular-nums">
-                      {item.roomNumber ? `каб. ${item.roomNumber}` : 'без каб.'}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

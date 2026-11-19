@@ -15,19 +15,22 @@ import { QrSizeSelector } from './QrSizeSelector.tsx';
 
 interface GroupDetailModalProps {
   groupCode: string | null;
+  qrToken?: string | null;
   onClose: () => void;
-  onOpenEquipmentDetail: (id: number) => void;
+  onOpenEquipmentDetail: (id: number, qrToken?: string) => void;
   currentUser: User | null;
   onReloadList?: () => void;
 }
 
 export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
   groupCode,
+  qrToken,
   onClose,
   onOpenEquipmentDetail,
   currentUser,
   onReloadList,
 }) => {
+  const isRegularUser = currentUser?.role === 'USER';
   const [data, setData] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,7 +50,8 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
     setError(null);
     setSuccessMsg(null);
 
-    apiFetch(`/api/equipment/qr-group/${groupCode}`)
+    const tokenSuffix = qrToken ? `?qr_token=${encodeURIComponent(qrToken)}` : '';
+    apiFetch(`/api/equipment/qr-group/${groupCode}${tokenSuffix}`)
       .then(async (res) => {
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
@@ -57,19 +61,21 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
       })
       .then(async (resData) => {
         setData(resData);
-        const qrPayload = resData.qrCode || resData.batch?.code;
-        if (qrPayload) {
+        const qrPayload = resData.qrCode || qrToken || resData.batch?.code;
+        if (qrPayload && !isRegularUser) {
           const url = await QRCode.toDataURL(qrPayload, {
             width: 220,
             margin: 1,
             errorCorrectionLevel: 'M',
           });
           setQrDataUrl(url);
+        } else {
+          setQrDataUrl('');
         }
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
-  }, [groupCode]);
+  }, [groupCode, qrToken, isRegularUser]);
 
   if (!groupCode) return null;
 
@@ -186,50 +192,52 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
           </div>
         ) : data ? (
           <div className="space-y-5">
-            {/* Top Info Box: QR + Gateway */}
-            <div className="flex flex-col sm:flex-row items-center gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
-              <div className="bg-white p-2 rounded-xl border border-slate-200 shadow-2xs shrink-0">
-                {qrDataUrl && (
-                  <img src={qrDataUrl} alt="QR" className="w-28 h-28 object-contain" />
-                )}
-              </div>
-              <div className="space-y-1 text-center sm:text-left flex-1">
-                <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wider">
-                  Внутренний код партии (без URL сайта)
-                </span>
-                <p className="text-xs font-mono text-slate-700 break-all select-all font-semibold">
-                  {data.qrCode || data.batch?.code}
-                </p>
-                <p className="text-[11px] text-slate-500 leading-tight">
-                  🔒 Внутри QR зашит только непрозрачный код. Посторонние не смогут узнать адрес сайта.
-                </p>
-                <div className="pt-2 border-t border-slate-200/80 space-y-2">
-                  <QrSizeSelector value={qrSizeCm} onChange={setQrSizeCm} compact />
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      onClick={handleDownloadDocx}
-                      disabled={downloadingDocx}
-                      className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1 shadow-2xs transition-colors"
-                    >
-                      <FileText className="w-3.5 h-3.5" />
-                      {downloadingDocx
-                        ? 'Загрузка...'
-                        : `Карточка DOCX (${qrSizeCm}×${qrSizeCm} см)`}
-                    </button>
-                    {qrDataUrl && (
-                      <a
-                        href={qrDataUrl}
-                        download={`QR-${groupCode}.png`}
-                        className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 rounded-lg text-xs font-semibold inline-flex items-center gap-1 transition-colors"
+            {/* Top Info Box: QR + Gateway (Staff only) */}
+            {!isRegularUser && (
+              <div className="flex flex-col sm:flex-row items-center gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <div className="bg-white p-2 rounded-xl border border-slate-200 shadow-2xs shrink-0">
+                  {qrDataUrl && (
+                    <img src={qrDataUrl} alt="QR" className="w-28 h-28 object-contain" />
+                  )}
+                </div>
+                <div className="space-y-1 text-center sm:text-left flex-1">
+                  <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wider">
+                    Внутренний код партии (без URL сайта)
+                  </span>
+                  <p className="text-xs font-mono text-slate-700 break-all select-all font-semibold">
+                    {data.qrCode || data.batch?.code}
+                  </p>
+                  <p className="text-[11px] text-slate-500 leading-tight">
+                    🔒 Внутри QR зашит только непрозрачный код. Посторонние не смогут узнать адрес сайта.
+                  </p>
+                  <div className="pt-2 border-t border-slate-200/80 space-y-2">
+                    <QrSizeSelector value={qrSizeCm} onChange={setQrSizeCm} compact />
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={handleDownloadDocx}
+                        disabled={downloadingDocx}
+                        className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-semibold inline-flex items-center gap-1 shadow-2xs transition-colors"
                       >
-                        <Download className="w-3.5 h-3.5" />
-                        PNG
-                      </a>
-                    )}
+                        <FileText className="w-3.5 h-3.5" />
+                        {downloadingDocx
+                          ? 'Загрузка...'
+                          : `Карточка DOCX (${qrSizeCm}×${qrSizeCm} см)`}
+                      </button>
+                      {qrDataUrl && (
+                        <a
+                          href={qrDataUrl}
+                          download={`QR-${groupCode}.png`}
+                          className="px-3 py-1.5 bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 rounded-lg text-xs font-semibold inline-flex items-center gap-1 transition-colors"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          PNG
+                        </a>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
+            )}
 
             {/* Bulk verify action during audit */}
             {currentUser && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
@@ -281,7 +289,7 @@ export const GroupDetailModal: React.FC<GroupDetailModalProps> = ({
                         <td className="p-2.5 text-right">
                           <button
                             onClick={() => {
-                              onOpenEquipmentDetail(item.id);
+                              onOpenEquipmentDetail(item.id, qrToken || data?.qrCode || undefined);
                               onClose();
                             }}
                             className="text-xs text-blue-600 hover:text-blue-800 font-semibold inline-flex items-center gap-1"

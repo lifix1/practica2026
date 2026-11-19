@@ -139,11 +139,16 @@ export async function ensureTablesExist() {
       CREATE TABLE IF NOT EXISTS equipment_issue (
         id BIGSERIAL PRIMARY KEY,
         equipment_id BIGINT NOT NULL REFERENCES equipment(id) ON DELETE CASCADE,
+        reported_by_user_id BIGINT REFERENCES "user"(id) ON DELETE SET NULL,
         state issue_state_enum NOT NULL,
         description TEXT NOT NULL,
         broken_at TIMESTAMP NOT NULL DEFAULT NOW(),
         repaired_at TIMESTAMP
       );
+    `);
+    await db.execute(sql`
+      ALTER TABLE equipment_issue
+      ADD COLUMN IF NOT EXISTS reported_by_user_id BIGINT REFERENCES "user"(id) ON DELETE SET NULL;
     `);
 
     await db.execute(sql`

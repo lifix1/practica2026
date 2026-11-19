@@ -13,6 +13,8 @@ import {
   Package,
   Layers,
   Settings2,
+  RotateCcw,
+  Trash2,
 } from 'lucide-react';
 import type { Equipment, User } from '../types/index.ts';
 import { apiFetch } from '../utils/api.ts';
@@ -71,9 +73,23 @@ function formatCostRu(val: number | string | null | undefined): string {
   });
 }
 
-function detectItemCase(item: Equipment): 'CASE_1' | 'CASE_2' | 'CASE_3' | 'OTHER' {
+function hasInventoryNumber(item: Pick<Equipment, 'inventory_number'>): boolean {
+  return Boolean(item.inventory_number && String(item.inventory_number).trim());
+}
+
+function isPreciousMetalsTrue(val: unknown): boolean {
+  if (val === true || val === 1) return true;
+  if (typeof val === 'string') {
+    const s = val.trim().toLowerCase();
+    return s === 'true' || s === '1' || s === 'да' || s === 'yes';
+  }
+  return false;
+}
+
+function detectItemCase(item: Equipment): 'CASE_1' | 'CASE_2' | 'CASE_3' | 'OTHER' | 'NO_INV' {
+  if (!hasInventoryNumber(item)) return 'NO_INV';
   const cat = (item.additional_fields?.accounting_category || '').toLowerCase();
-  const hasDm = Boolean(item.additional_fields?.precious_metals);
+  const hasDm = isPreciousMetalsTrue(item.additional_fields?.precious_metals);
   if (cat.includes('малоцен') && hasDm) return 'CASE_2';
   if (cat.includes('малоцен') && !hasDm) return 'CASE_3';
   if (cat.includes('дорогостоящ') && hasDm) return 'CASE_1';
@@ -119,6 +135,20 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
     | null
   >(null);
   const [confirmWriteoffLoading, setConfirmWriteoffLoading] = useState(false);
+  const [rollbackTarget, setRollbackTarget] = useState<
+    | { mode: 'single'; item: Equipment }
+    | { mode: 'bulk'; ids: number[]; items: Equipment[] }
+    | null
+  >(null);
+  const [rollbackNextState, setRollbackNextState] = useState<'NONE' | 'DOCUMENTS_PREPARATION'>('NONE');
+  const [rollbackLoading, setRollbackLoading] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<
+    | { mode: 'single'; item: Equipment }
+    | { mode: 'bulk'; ids: number[]; items: Equipment[] }
+    | null
+  >(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [feedbackMsg, setFeedbackMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(
     null
   );
@@ -131,9 +161,10 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
     setLoading(true);
     try {
       const params = new URLSearchParams();
+      params.set('only_writeoffs', 'true');
       params.set('include_written_off', 'true');
       if (filterState) params.set('writeoff_state', filterState);
-      params.set('limit', '200');
+      params.set('limit', '500');
 
       const res = await apiFetch(`/api/equipment?${params.toString()}`);
       const data = await res.json();
@@ -179,13 +210,28 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
     return () => clearTimeout(timer);
   }, [modalSearch, showNewWriteoffModal]);
 
-  const visibleItems = items.filter((item) => {
-    if (caseFilter === 'CASE_1') return detectItemCase(item) === 'CASE_1';
-    if (caseFilter === 'CASE_2') return detectItemCase(item) === 'CASE_2';
-    if (caseFilter === 'CASE_3') return detectItemCase(item) === 'CASE_3';
-    if (caseFilter === 'OTHER') return detectItemCase(item) === 'OTHER';
-    return true;
-  });
+  const visibleItems = items
+    .filter((item) => {
+      const c = detectItemCase(item);
+      if (caseFilter === 'CASE_1') return c === 'CASE_1';
+      if (caseFilter === 'CASE_2') return c === 'CASE_2';
+      if (caseFilter === 'CASE_3') return c === 'CASE_3';
+      if (caseFilter === 'OTHER') return c === 'OTHER' || c === 'NO_INV';
+      return true;
+    })
+    .sort((a, b) => {
+      const aWritten = a.writeoffState === 'WRITTEN_OFF';
+      const bWritten = b.writeoffState === 'WRITTEN_OFF';
+      if (aWritten !== bWritten) return aWritten ? 1 : -1;
+      if (aWritten && bWritten) {
+        const aTime = a.writeoffDate ? new Date(a.writeoffDate).getTime() : 0;
+        const bTime = b.writeoffDate ? new Date(b.writeoffDate).getTime() : 0;
+        const validA = Number.isFinite(aTime) ? aTime : 0;
+        const validB = Number.isFinite(bTime) ? bTime : 0;
+        if (validA !== validB) return validB - validA;
+      }
+      return Number(b.id) - Number(a.id);
+    });
 
   const toggleSelect = (id: number) => {
     setSelectedIds((prev) =>
@@ -391,18 +437,25 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
       const updateData = await updateRes.json();
       if (!updateRes.ok) throw new Error(updateData.error || 'Ошибка списания оборудования');
 
-      const selectedObjs = availableEquipment.filter((eq) => selectedEqIds.includes(eq.id));
-      const actEligibleIds =
-        docFormMode === 'auto'
-          ? selectedObjs.filter((eq) => detectItemCase(eq) !== 'OTHER').map((eq) => eq.id)
-          : [...selectedEqIds];
+      const selectedObjs = availableEquipment.filter(
+        (eq) => selectedEqIds.includes(eq.id) && hasInventoryNumber(eq)
+      );
+      const actEligibleIds = selectedObjs
+        .filter((eq) => {
+          const c = detectItemCase(eq);
+          return docFormMode === 'auto'
+            ? c === 'CASE_1' || c === 'CASE_2' || c === 'CASE_3'
+            : c !== 'NO_INV';
+        })
+        .map((eq) => eq.id);
       const invoiceEligibleIds =
         docFormMode === 'case3'
           ? []
           : selectedObjs
               .filter((eq) => {
-                if (docFormMode !== 'auto') return true;
                 const c = detectItemCase(eq);
+                if (c === 'NO_INV') return false;
+                if (docFormMode !== 'auto') return true;
                 return c === 'CASE_1' || c === 'CASE_2';
               })
               .map((eq) => eq.id);
@@ -497,6 +550,94 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
       setFeedbackMsg({ type: 'error', text: e.message || 'Ошибка завершения списания' });
     } finally {
       setConfirmWriteoffLoading(false);
+    }
+  };
+
+  // Rollback writeoff status (with confirmation)
+  const handleConfirmRollback = async () => {
+    if (!rollbackTarget) return;
+    setRollbackLoading(true);
+    try {
+      const targetIds =
+        rollbackTarget.mode === 'single' ? [rollbackTarget.item.id] : rollbackTarget.ids;
+
+      const res = await apiFetch('/api/writeoff/rollback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          equipment_ids: targetIds,
+          target_state: rollbackNextState,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || 'Ошибка отката списания');
+
+      if (rollbackTarget.mode === 'bulk') {
+        setSelectedIds([]);
+      } else {
+        setSelectedIds((prev) => prev.filter((id) => id !== rollbackTarget.item.id));
+      }
+
+      const successText =
+        rollbackTarget.mode === 'single'
+          ? rollbackNextState === 'NONE'
+            ? `Списание «${rollbackTarget.item.name}» откачено — позиция возвращена в активный учёт.`
+            : `Позиция «${rollbackTarget.item.name}» возвращена на этап «Подготовка документов».`
+          : rollbackNextState === 'NONE'
+          ? `Выполнен откат списания для ${targetIds.length} ед. оборудования (возвращены в активный учёт).`
+          : `Для ${targetIds.length} ед. оборудования выполнен откат на этап «Подготовка документов».`;
+
+      setRollbackTarget(null);
+      setRollbackNextState('NONE');
+      await fetchItems();
+      setFeedbackMsg({ type: 'success', text: successText });
+    } catch (err: any) {
+      setFeedbackMsg({ type: 'error', text: err.message || 'Ошибка отката списания' });
+    } finally {
+      setRollbackLoading(false);
+    }
+  };
+
+  // Single or Bulk Equipment Delete from DB (identical to main table)
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      if (deleteTarget.mode === 'single') {
+        const res = await apiFetch(`/api/equipment/${deleteTarget.item.id}`, {
+          method: 'DELETE',
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Ошибка удаления оборудования');
+        }
+        setSelectedIds((prev) => prev.filter((id) => id !== deleteTarget.item.id));
+      } else {
+        const res = await apiFetch('/api/equipment/bulk-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ equipment_ids: deleteTarget.ids }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error || 'Ошибка массового удаления');
+        }
+        setSelectedIds([]);
+      }
+
+      const deletedText =
+        deleteTarget.mode === 'single'
+          ? `Оборудование «${deleteTarget.item.name}» удалено из базы данных.`
+          : `Удалено записей оборудования: ${deleteTarget.ids.length} шт.`;
+
+      setDeleteTarget(null);
+      await fetchItems();
+      setFeedbackMsg({ type: 'success', text: deletedText });
+    } catch (err: any) {
+      setDeleteError(err.message || 'Ошибка удаления оборудования');
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -736,26 +877,38 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
             </button>
             {(() => {
               const selectedObjs = items.filter((it) => selectedIds.includes(it.id));
-              const actEligibleIds =
-                docFormMode === 'auto'
-                  ? selectedObjs.filter((it) => detectItemCase(it) !== 'OTHER').map((it) => it.id)
-                  : selectedIds;
+              const balanceSelected = selectedObjs.filter(hasInventoryNumber);
+              const actEligibleIds = balanceSelected
+                .filter((it) => {
+                  const c = detectItemCase(it);
+                  return docFormMode === 'auto'
+                    ? c === 'CASE_1' || c === 'CASE_2' || c === 'CASE_3'
+                    : true;
+                })
+                .map((it) => it.id);
               const invoiceEligibleIds =
                 docFormMode === 'case3'
                   ? []
-                  : docFormMode === 'auto'
-                  ? selectedObjs
+                  : balanceSelected
                       .filter((it) => {
+                        if (docFormMode !== 'auto') return true;
                         const c = detectItemCase(it);
                         return c === 'CASE_1' || c === 'CASE_2';
                       })
-                      .map((it) => it.id)
-                  : selectedIds;
+                      .map((it) => it.id);
+
+              if (balanceSelected.length === 0) {
+                return (
+                  <span className="px-2.5 py-1.5 rounded-lg bg-slate-200 text-slate-700 text-[11px] font-semibold">
+                    Позиции без инв. № не подлежат списанию (только удаление)
+                  </span>
+                );
+              }
 
               if (actEligibleIds.length === 0) {
                 return (
                   <span className="px-2.5 py-1.5 rounded-lg bg-slate-200 text-slate-700 text-[11px] font-semibold">
-                    Нет кейса списания — документы не формируются
+                    Нет кейса списания — акты и накладные не формируются
                   </span>
                 );
               }
@@ -791,21 +944,65 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                 </>
               );
             })()}
-            {canManage && (
-              <button
-                type="button"
-                onClick={() =>
-                  setConfirmWriteoffTarget({
-                    mode: 'bulk',
-                    ids: [...selectedIds],
-                    items: items.filter((it) => selectedIds.includes(it.id)),
-                  })
-                }
-                className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-xs"
-              >
-                Перевести в «Списано»
-              </button>
-            )}
+            {canManage && (() => {
+              const selectedObjs = items.filter((it) => selectedIds.includes(it.id));
+              const eligibleBulkItems = selectedObjs.filter(
+                (it) => hasInventoryNumber(it) && it.writeoffState !== 'WRITTEN_OFF'
+              );
+              return (
+                <>
+                  {eligibleBulkItems.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setConfirmWriteoffTarget({
+                          mode: 'bulk',
+                          ids: eligibleBulkItems.map((it) => it.id),
+                          items: eligibleBulkItems,
+                        })
+                      }
+                      className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-xs font-semibold shadow-xs"
+                    >
+                      Перевести в «Списано»
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRollbackNextState('NONE');
+                      setRollbackTarget({
+                        mode: 'bulk',
+                        ids: selectedObjs.map((it) => it.id),
+                        items: selectedObjs,
+                      });
+                    }}
+                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-semibold shadow-xs inline-flex items-center gap-1"
+                    title="Откатить списание для выбранных позиций"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Откатить списание
+                  </button>
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeleteError(null);
+                        setDeleteTarget({
+                          mode: 'bulk',
+                          ids: selectedObjs.map((it) => it.id),
+                          items: selectedObjs,
+                        });
+                      }}
+                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold shadow-xs inline-flex items-center gap-1"
+                      title="Удалить выбранное оборудование из базы данных"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Удалить ({selectedObjs.length})
+                    </button>
+                  )}
+                </>
+              );
+            })()}
             <button
               onClick={() => setSelectedIds([])}
               className="px-2.5 py-1.5 text-slate-600 hover:text-slate-900 font-medium"
@@ -846,7 +1043,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
           </div>
         ) : (
           <div className="divide-y divide-slate-100 text-xs">
-            <div className="p-3 bg-slate-50 text-slate-500 font-semibold flex items-center justify-between text-[11px]">
+            <div className="p-3 bg-slate-50 text-slate-500 font-semibold flex flex-wrap items-center justify-between gap-2 text-[11px]">
               <div className="flex items-center gap-2">
                 <input
                   type="checkbox"
@@ -856,7 +1053,20 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                 />
                 <span>Выбрать все ({visibleItems.length} ед.)</span>
               </div>
-              <span>Документы и статусы</span>
+              <div className="flex flex-wrap items-center gap-3 text-[10px] font-medium text-slate-600">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded bg-[#fdf9ef] border border-[#e6d6b1]" />
+                  Выбрано для списания
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded bg-[#f4e7cf] border border-[#d7be92]" />
+                  Проходит процедуру
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-3 h-3 rounded bg-slate-200 border border-slate-300" />
+                  Списано (внизу, новые сверху)
+                </span>
+              </div>
             </div>
 
             {visibleItems.map((item) => {
@@ -871,12 +1081,20 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
               const unitCost = Number(item.initial_cost) || 0;
               const totalCost = Math.round(unitCost * qty * 100) / 100;
 
+              const isWrittenOff = item.writeoffState === 'WRITTEN_OFF';
+              const isDocsPrep = item.writeoffState === 'DOCUMENTS_PREPARATION';
+              const rowBgClass = isSelected
+                ? 'bg-indigo-50/55 ring-1 ring-inset ring-indigo-300'
+                : isWrittenOff
+                ? 'bg-slate-200/75 hover:bg-slate-200 text-slate-600'
+                : isDocsPrep
+                ? 'bg-[#f4e7cf] hover:bg-[#ecdabc]'
+                : 'bg-[#fdf9ef] hover:bg-[#f7f0dc]';
+
               return (
                 <div
                   key={item.id}
-                  className={`p-4 hover:bg-slate-50 flex flex-col lg:flex-row lg:items-center justify-between gap-3 transition-colors ${
-                    isSelected ? 'bg-indigo-50/40' : ''
-                  }`}
+                  className={`p-4 flex flex-col lg:flex-row lg:items-center justify-between gap-3 transition-colors ${rowBgClass}`}
                 >
                   <div className="flex items-start sm:items-center gap-3">
                     <input
@@ -919,6 +1137,11 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                             Без кейса списания
                           </span>
                         )}
+                        {detectedCase === 'NO_INV' && (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-50 text-red-700 text-[10px] font-semibold border border-red-200">
+                            Без инв. № (не на балансе)
+                          </span>
+                        )}
                         {kitPart && (
                           <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 text-[10px] font-semibold">
                             <Package className="w-3 h-3" />
@@ -954,22 +1177,28 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
 
                   <div className="flex flex-wrap items-center gap-2 shrink-0">
                     <span
-                      className={`px-2.5 py-1 rounded-full text-[11px] font-semibold ${
+                      className={`px-2.5 py-1 rounded-full text-[11px] font-semibold border ${
                         item.writeoffState === 'WRITTEN_OFF'
-                          ? 'bg-slate-200 text-slate-800'
+                          ? 'bg-slate-200 text-slate-700 border-slate-300'
                           : item.writeoffState === 'DOCUMENTS_PREPARATION'
-                          ? 'bg-purple-100 text-purple-800'
-                          : 'bg-amber-100 text-amber-800'
+                          ? 'bg-[#ead5b2] text-amber-950 border-[#d7be92]'
+                          : 'bg-[#f6ecd4] text-amber-900 border-[#e6d6b1]'
                       }`}
                     >
                       {item.writeoffState === 'WRITTEN_OFF'
-                        ? 'Списано'
+                        ? item.writeoffDate
+                          ? `Списано · ${new Date(item.writeoffDate).toLocaleDateString('ru-RU')}`
+                          : 'Списано'
                         : item.writeoffState === 'DOCUMENTS_PREPARATION'
-                        ? 'Подготовка документов'
-                        : 'Готовится к списанию'}
+                        ? 'Проходит процедуру'
+                        : 'Выбрано для списания'}
                     </span>
 
-                    {(detectedCase !== 'OTHER' || docFormMode !== 'auto') ? (
+                    {detectedCase === 'NO_INV' ? (
+                      <span className="px-2.5 py-1 bg-red-50 text-red-700 border border-red-200 rounded-lg text-[11px] font-medium">
+                        Не списывается (только удаление)
+                      </span>
+                    ) : (detectedCase !== 'OTHER' || docFormMode !== 'auto') ? (
                       <>
                         <button
                           onClick={() => handleDownloadActForIds([item.id])}
@@ -1001,22 +1230,55 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                       </span>
                     )}
 
-                    {canManage && item.writeoffState !== 'WRITTEN_OFF' && (
+                    {canManage && item.writeoffState !== 'WRITTEN_OFF' && detectedCase !== 'NO_INV' && (
                       <button
                         type="button"
                         onClick={() => setConfirmWriteoffTarget({ mode: 'single', item })}
-                        className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium"
+                        className="px-2.5 py-1 bg-white/80 hover:bg-white border border-slate-300 text-slate-700 rounded-lg text-xs font-medium"
                       >
                         Завершить списание
                       </button>
                     )}
 
+                    {isAdmin && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setRollbackNextState('NONE');
+                          setRollbackTarget({ mode: 'single', item });
+                        }}
+                        className="px-2.5 py-1 bg-white/80 hover:bg-amber-50 border border-amber-300 text-amber-800 rounded-lg text-xs font-medium inline-flex items-center gap-1 transition-colors"
+                        title={
+                          item.writeoffState === 'WRITTEN_OFF'
+                            ? 'Откатить списание (вернуть в активный учёт или на подготовку документов)'
+                            : 'Убрать из списка списания (откатить статус)'
+                        }
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        Откатить
+                      </button>
+                    )}
+
                     <button
                       onClick={() => onOpenEquipmentDetail(item.id)}
-                      className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold"
+                      className="px-3 py-1 bg-white/80 hover:bg-white border border-slate-200 text-slate-700 rounded-lg text-xs font-semibold"
                     >
                       Паспорт
                     </button>
+
+                    {isAdmin && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeleteError(null);
+                          setDeleteTarget({ mode: 'single', item });
+                        }}
+                        className="p-1.5 rounded-lg bg-white/80 border border-red-200 hover:bg-red-50 text-red-600 transition-colors"
+                        title="Удалить оборудование из базы данных"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
               );
@@ -1065,6 +1327,7 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                     filteredModalEq.map((eq) => {
                       const checked = selectedEqIds.includes(eq.id);
                       const eqCase = detectItemCase(eq);
+                      const canWriteoff = eqCase !== 'NO_INV';
                       const qty =
                         Number(eq.additional_fields?.quantity) > 0
                           ? Number(eq.additional_fields?.quantity)
@@ -1072,22 +1335,31 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                       return (
                         <label
                           key={eq.id}
-                          className={`flex items-center justify-between gap-2 p-2.5 cursor-pointer hover:bg-slate-50 ${
-                            checked ? 'bg-red-50/50' : ''
+                          className={`flex items-center justify-between gap-2 p-2.5 ${
+                            canWriteoff
+                              ? `cursor-pointer hover:bg-slate-50 ${checked ? 'bg-red-50/50' : ''}`
+                              : 'cursor-not-allowed bg-slate-50/70 opacity-65'
                           }`}
+                          title={
+                            canWriteoff
+                              ? undefined
+                              : 'Оборудование без инвентарного номера не находится на балансе — его можно только удалить'
+                          }
                         >
                           <div className="flex items-center gap-2.5 min-w-0">
                             <input
                               type="checkbox"
-                              checked={checked}
-                              onChange={() =>
+                              checked={checked && canWriteoff}
+                              disabled={!canWriteoff}
+                              onChange={() => {
+                                if (!canWriteoff) return;
                                 setSelectedEqIds((prev) =>
                                   prev.includes(eq.id)
                                     ? prev.filter((id) => id !== eq.id)
                                     : [...prev, eq.id]
-                                )
-                              }
-                              className="rounded text-red-600"
+                                );
+                              }}
+                              className="rounded text-red-600 disabled:opacity-40"
                             />
                             <span className="font-mono text-[11px] bg-slate-100 px-1.5 py-0.5 rounded shrink-0">
                               {eq.inventory_number || 'б/н'}
@@ -1112,7 +1384,12 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                             )}
                             {eqCase === 'OTHER' && (
                               <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-semibold">
-                                Без кейса
+                                Без кейса (без акта)
+                              </span>
+                            )}
+                            {eqCase === 'NO_INV' && (
+                              <span className="px-1.5 py-0.5 rounded bg-red-50 text-red-700 border border-red-200 font-semibold">
+                                Без инв. № · только удаление
                               </span>
                             )}
                             {qty > 1 && (
@@ -1286,6 +1563,178 @@ export const WriteoffsManager: React.FC<WriteoffsManagerProps> = ({
                 className="px-4 py-2 bg-red-600 hover:bg-red-700 disabled:bg-red-400 text-white rounded-xl text-xs font-bold shadow-xs"
               >
                 {confirmWriteoffLoading ? 'Выполнение...' : 'Подтвердить списание'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rollback Confirmation Modal */}
+      {rollbackTarget && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-900/55 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                  <RotateCcw className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-base text-slate-900">
+                    Откат списания оборудования
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Подтвердите возврат из статуса списания
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !rollbackLoading && setRollbackTarget(null)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1.5">
+              {rollbackTarget.mode === 'single' ? (
+                <>
+                  <div className="font-semibold text-slate-900">
+                    {rollbackTarget.item.name}
+                  </div>
+                  <div className="text-[11px] text-slate-600 font-mono tabular-nums">
+                    Инв. № {rollbackTarget.item.inventory_number || 'б/н'} · ID #{rollbackTarget.item.id}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="font-semibold text-slate-900">
+                    Выбрано единиц оборудования: {rollbackTarget.ids.length} шт.
+                  </div>
+                  <div className="max-h-28 overflow-y-auto divide-y divide-slate-200/70 pr-1">
+                    {rollbackTarget.items.map((eq) => (
+                      <div key={eq.id} className="py-1 flex items-center justify-between gap-2 text-[11px]">
+                        <span className="text-slate-800 truncate">{eq.name}</span>
+                        <span className="font-mono text-slate-500 shrink-0">
+                          {eq.inventory_number || `ID #${eq.id}`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="space-y-2 text-xs">
+              <label className="flex items-start gap-2 p-2.5 rounded-xl border border-slate-200 cursor-pointer hover:bg-slate-50">
+                <input
+                  type="radio"
+                  name="rollbackNextState"
+                  checked={rollbackNextState === 'NONE'}
+                  onChange={() => setRollbackNextState('NONE')}
+                  className="mt-0.5 text-amber-600"
+                />
+                <div>
+                  <div className="font-semibold text-slate-900">
+                    Полный откат (вернуть в активное оборудование)
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    Статус списания будет снят, позиция исчезнет со вкладки «Списание» и снова станет доступна для редактирования, выдачи и инвентаризации.
+                  </div>
+                </div>
+              </label>
+              <label className="flex items-start gap-2 p-2.5 rounded-xl border border-slate-200 cursor-pointer hover:bg-slate-50">
+                <input
+                  type="radio"
+                  name="rollbackNextState"
+                  checked={rollbackNextState === 'DOCUMENTS_PREPARATION'}
+                  onChange={() => setRollbackNextState('DOCUMENTS_PREPARATION')}
+                  className="mt-0.5 text-amber-600"
+                />
+                <div>
+                  <div className="font-semibold text-slate-900">
+                    Вернуть на этап «Проходит процедуру»
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    Дата окончательного списания очистится, позиция останется во вкладке «Списание» в статусе подготовки документов.
+                  </div>
+                </div>
+              </label>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setRollbackTarget(null)}
+                disabled={rollbackLoading}
+                className="px-3.5 py-2 border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 rounded-xl text-xs font-semibold"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmRollback}
+                disabled={rollbackLoading}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 disabled:bg-amber-400 text-white rounded-xl text-xs font-bold shadow-xs"
+              >
+                {rollbackLoading ? 'Выполнение...' : 'Подтвердить откат'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Equipment Confirmation Modal (identical to main table) */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-60 flex items-center justify-center bg-slate-900/55 p-4">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full p-6 space-y-4">
+            <h3 className="font-bold text-base text-slate-900 flex items-center gap-2">
+              <Trash2 className="w-5 h-5 text-red-600" />
+              {deleteTarget.mode === 'single'
+                ? 'Удаление оборудования'
+                : `Удаление выбранного оборудования (${deleteTarget.ids.length} ед.)`}
+            </h3>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              {deleteTarget.mode === 'single' ? (
+                <>
+                  Вы действительно хотите удалить{' '}
+                  <strong className="text-slate-900">«{deleteTarget.item.name}»</strong>{' '}
+                  ({deleteTarget.item.inventory_number ? (
+                    <>инв. № <span className="font-mono">{deleteTarget.item.inventory_number}</span></>
+                  ) : (
+                    <>ID #{deleteTarget.item.id}</>
+                  )})?
+                  Запись будет полностью удалена из базы данных. Это действие необратимо.
+                </>
+              ) : (
+                <>
+                  Вы действительно хотите удалить выбранные единицы оборудования (
+                  <strong>{deleteTarget.ids.length} шт.</strong>) из базы данных? Все связанные
+                  записи о списании, проверках, неисправностях и передачах будут также удалены.
+                </>
+              )}
+            </p>
+            {deleteError && (
+              <div className="p-2.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700">
+                {deleteError}
+              </div>
+            )}
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleting}
+                className="px-3.5 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 rounded-xl"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDelete}
+                disabled={deleting}
+                className="px-4 py-2 text-xs font-bold bg-red-600 hover:bg-red-700 disabled:bg-red-400 text-white rounded-xl shadow-xs"
+              >
+                {deleting ? 'Удаление...' : 'Удалить'}
               </button>
             </div>
           </div>

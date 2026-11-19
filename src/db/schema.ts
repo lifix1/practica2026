@@ -114,6 +114,8 @@ export const equipmentIssues = pgTable('equipment_issue', {
   equipment_id: bigint('equipment_id', { mode: 'number' })
     .notNull()
     .references(() => equipment.id, { onDelete: 'cascade' }),
+  reported_by_user_id: bigint('reported_by_user_id', { mode: 'number' })
+    .references(() => users.id, { onDelete: 'set null' }),
   state: issueStateEnum('state').notNull(),
   description: text('description').notNull(),
   broken_at: timestamp('broken_at').notNull().defaultNow(),

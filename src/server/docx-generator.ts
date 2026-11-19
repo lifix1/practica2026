@@ -566,11 +566,24 @@ export async function generateQrDocx(
   return await Packer.toBuffer(doc);
 }
 
+export function isPreciousMetalsFlag(val: unknown): boolean {
+  if (val === true || val === 1) return true;
+  if (typeof val === 'string') {
+    const s = val.trim().toLowerCase();
+    return s === 'true' || s === '1' || s === 'да' || s === 'yes';
+  }
+  return false;
+}
+
 export function detectEquipmentWriteoffCase(item: {
+  inventory_number?: string | null;
   additional_fields?: Record<string, any> | null;
 }): 'case1' | 'case2' | 'case3' | null {
+  if (!item.inventory_number || !String(item.inventory_number).trim()) {
+    return null;
+  }
   const cat = String(item.additional_fields?.accounting_category || '').toLowerCase();
-  const hasDm = Boolean(item.additional_fields?.precious_metals);
+  const hasDm = isPreciousMetalsFlag(item.additional_fields?.precious_metals);
   if (cat.includes('малоцен') && hasDm) return 'case2';
   if (cat.includes('малоцен') && !hasDm) return 'case3';
   if (cat.includes('дорогостоящ') && hasDm) return 'case1';
