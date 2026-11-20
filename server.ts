@@ -6796,17 +6796,41 @@ app.get('/api/audit-logs', requireAuth, requireRole('ADMIN', 'ENGINEER'), async 
     }
 
     const whereExpr = conditions.length > 0 ? and(...conditions) : undefined;
-
-    const allMatched = await db
-      .select()
-      .from(auditLogs)
-      .where(whereExpr)
-      .orderBy(desc(auditLogs.created_at), desc(auditLogs.id));
-
-    const total = allMatched.length;
-    const totalPages = Math.max(1, Math.ceil(total / limit));
     const offset = (page - 1) * limit;
-    const paged = allMatched.slice(offset, offset + limit).map((row: any) => {
+
+    const [countResult, pageRows, severityRows] = await Promise.all([
+      db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(auditLogs)
+        .where(whereExpr),
+      db
+        .select()
+        .from(auditLogs)
+        .where(whereExpr)
+        .orderBy(desc(auditLogs.created_at), desc(auditLogs.id))
+        .limit(limit)
+        .offset(offset),
+      roleScope
+        ? db
+            .select({
+              severity: auditLogs.severity,
+              count: sql<number>`count(*)::int`,
+            })
+            .from(auditLogs)
+            .where(roleScope)
+            .groupBy(auditLogs.severity)
+        : db
+            .select({
+              severity: auditLogs.severity,
+              count: sql<number>`count(*)::int`,
+            })
+            .from(auditLogs)
+            .groupBy(auditLogs.severity),
+    ]);
+
+    const total = Number(countResult[0]?.count || 0);
+    const totalPages = Math.max(1, Math.ceil(total / limit));
+    const paged = pageRows.map((row: any) => {
       if (capabilities.canViewTechnicalMeta || row.actor_id === user.id) {
         return row;
       }
@@ -6814,17 +6838,14 @@ app.get('/api/audit-logs', requireAuth, requireRole('ADMIN', 'ENGINEER'), async 
       return safeRow;
     });
 
-    // Scope-wide stats for the summary strip
-    const scopeRows = roleScope
-      ? await db.select({ severity: auditLogs.severity }).from(auditLogs).where(roleScope)
-      : await db.select({ severity: auditLogs.severity }).from(auditLogs);
-
-    const stats = {
-      total: scopeRows.length,
-      info: scopeRows.filter((r: any) => r.severity === 'INFO').length,
-      warning: scopeRows.filter((r: any) => r.severity === 'WARNING').length,
-      critical: scopeRows.filter((r: any) => r.severity === 'CRITICAL').length,
-    };
+    const stats = { total: 0, info: 0, warning: 0, critical: 0 };
+    for (const sRow of severityRows) {
+      const c = Number(sRow.count || 0);
+      stats.total += c;
+      if (sRow.severity === 'INFO') stats.info += c;
+      else if (sRow.severity === 'WARNING') stats.warning += c;
+      else if (sRow.severity === 'CRITICAL') stats.critical += c;
+    }
 
     let actors: Array<{ id: number | null; login: string; role: string }> | undefined;
     if (capabilities.canViewAllUsers) {
