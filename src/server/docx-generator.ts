@@ -345,7 +345,7 @@ function makeCell(
 
 export async function generateQrDocx(
   items: EquipmentForDocx[],
-  baseUrl: string,
+  _baseUrl: string,
   options: QrDocxOptions = {}
 ): Promise<Buffer> {
   const qrSizeCm = normalizeQrSizeCm(options.qrSizeCm);

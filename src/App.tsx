@@ -1,24 +1,53 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, lazy, Suspense } from 'react';
 import { ShieldCheck } from 'lucide-react';
 import { Header } from './components/Header.tsx';
 import { EquipmentList } from './components/EquipmentList.tsx';
-import { EquipmentDetailModal } from './components/EquipmentDetailModal.tsx';
-import { EquipmentFormModal } from './components/EquipmentFormModal.tsx';
-import { ExcelImportModal } from './components/ExcelImportModal.tsx';
-import { QrScannerModal } from './components/QrScannerModal.tsx';
-import { InventoryManager } from './components/InventoryManager.tsx';
-import { TypesManager } from './components/TypesManager.tsx';
-import { TransfersManager } from './components/TransfersManager.tsx';
-import { WriteoffsManager } from './components/WriteoffsManager.tsx';
-import { RoomsManager } from './components/RoomsManager.tsx';
-import { UsersManager } from './components/UsersManager.tsx';
-import { NotificationPanel } from './components/NotificationPanel.tsx';
 import { LoginModal } from './components/LoginModal.tsx';
-import { ChangePasswordModal } from './components/ChangePasswordModal.tsx';
-import { GroupDetailModal } from './components/GroupDetailModal.tsx';
-import { AuditLogsManager } from './components/AuditLogsManager.tsx';
 import type { User, Room, EquipmentType, NotificationItem } from './types/index.ts';
 import { apiFetch, clearSessionAuth, setSessionAuth } from './utils/api.ts';
+
+const EquipmentDetailModal = lazy(() =>
+  import('./components/EquipmentDetailModal.tsx').then((m) => ({ default: m.EquipmentDetailModal }))
+);
+const EquipmentFormModal = lazy(() =>
+  import('./components/EquipmentFormModal.tsx').then((m) => ({ default: m.EquipmentFormModal }))
+);
+const ExcelImportModal = lazy(() =>
+  import('./components/ExcelImportModal.tsx').then((m) => ({ default: m.ExcelImportModal }))
+);
+const QrScannerModal = lazy(() =>
+  import('./components/QrScannerModal.tsx').then((m) => ({ default: m.QrScannerModal }))
+);
+const InventoryManager = lazy(() =>
+  import('./components/InventoryManager.tsx').then((m) => ({ default: m.InventoryManager }))
+);
+const TypesManager = lazy(() =>
+  import('./components/TypesManager.tsx').then((m) => ({ default: m.TypesManager }))
+);
+const TransfersManager = lazy(() =>
+  import('./components/TransfersManager.tsx').then((m) => ({ default: m.TransfersManager }))
+);
+const WriteoffsManager = lazy(() =>
+  import('./components/WriteoffsManager.tsx').then((m) => ({ default: m.WriteoffsManager }))
+);
+const RoomsManager = lazy(() =>
+  import('./components/RoomsManager.tsx').then((m) => ({ default: m.RoomsManager }))
+);
+const UsersManager = lazy(() =>
+  import('./components/UsersManager.tsx').then((m) => ({ default: m.UsersManager }))
+);
+const NotificationPanel = lazy(() =>
+  import('./components/NotificationPanel.tsx').then((m) => ({ default: m.NotificationPanel }))
+);
+const ChangePasswordModal = lazy(() =>
+  import('./components/ChangePasswordModal.tsx').then((m) => ({ default: m.ChangePasswordModal }))
+);
+const GroupDetailModal = lazy(() =>
+  import('./components/GroupDetailModal.tsx').then((m) => ({ default: m.GroupDetailModal }))
+);
+const AuditLogsManager = lazy(() =>
+  import('./components/AuditLogsManager.tsx').then((m) => ({ default: m.AuditLogsManager }))
+);
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -341,155 +370,165 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'inventory' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
-          <InventoryManager
-            currentUser={currentUser}
-            onOpenEquipmentDetail={(id) => {
-              setSelectedEquipmentQrToken(null);
-              setSelectedEquipmentId(id);
-            }}
-            onRefreshGlobalAuditState={refreshAuditState}
-            onOpenQrScanner={() => setShowQrScannerModal(true)}
-          />
-        )}
+        <Suspense
+          fallback={
+            <div className="py-12 flex justify-center">
+              <div className="w-7 h-7 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+            </div>
+          }
+        >
+          {activeTab === 'inventory' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
+            <InventoryManager
+              currentUser={currentUser}
+              onOpenEquipmentDetail={(id) => {
+                setSelectedEquipmentQrToken(null);
+                setSelectedEquipmentId(id);
+              }}
+              onRefreshGlobalAuditState={refreshAuditState}
+              onOpenQrScanner={() => setShowQrScannerModal(true)}
+            />
+          )}
 
-        {activeTab === 'types' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
-          <TypesManager
-            currentUser={currentUser}
-            types={types}
-            onRefreshTypes={fetchTypes}
-          />
-        )}
+          {activeTab === 'types' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
+            <TypesManager
+              currentUser={currentUser}
+              types={types}
+              onRefreshTypes={fetchTypes}
+            />
+          )}
 
-        {activeTab === 'transfers' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
-          <TransfersManager
-            currentUser={currentUser}
-            onOpenEquipmentDetail={(id) => {
-              setSelectedEquipmentQrToken(null);
-              setSelectedEquipmentId(id);
-            }}
-          />
-        )}
+          {activeTab === 'transfers' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
+            <TransfersManager
+              currentUser={currentUser}
+              onOpenEquipmentDetail={(id) => {
+                setSelectedEquipmentQrToken(null);
+                setSelectedEquipmentId(id);
+              }}
+            />
+          )}
 
-        {activeTab === 'writeoffs' && currentUser.role === 'ADMIN' && (
-          <WriteoffsManager
-            currentUser={currentUser}
-            onOpenEquipmentDetail={(id) => {
-              setSelectedEquipmentQrToken(null);
-              setSelectedEquipmentId(id);
-            }}
-          />
-        )}
+          {activeTab === 'writeoffs' && currentUser.role === 'ADMIN' && (
+            <WriteoffsManager
+              currentUser={currentUser}
+              onOpenEquipmentDetail={(id) => {
+                setSelectedEquipmentQrToken(null);
+                setSelectedEquipmentId(id);
+              }}
+            />
+          )}
 
-        {activeTab === 'rooms' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
-          <RoomsManager
-            currentUser={currentUser}
-            rooms={rooms}
-            onRefreshRooms={fetchRooms}
-          />
-        )}
+          {activeTab === 'rooms' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
+            <RoomsManager
+              currentUser={currentUser}
+              rooms={rooms}
+              onRefreshRooms={fetchRooms}
+            />
+          )}
 
-        {activeTab === 'users' && currentUser.role === 'ADMIN' && (
-          <UsersManager currentUser={currentUser} />
-        )}
+          {activeTab === 'users' && currentUser.role === 'ADMIN' && (
+            <UsersManager currentUser={currentUser} />
+          )}
 
-        {activeTab === 'logs' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
-          <AuditLogsManager
-            currentUser={currentUser}
-            onOpenEquipmentDetail={(id) => {
-              setSelectedEquipmentQrToken(null);
-              setSelectedEquipmentId(id);
-            }}
-          />
-        )}
+          {activeTab === 'logs' && ['ADMIN', 'ENGINEER'].includes(currentUser.role) && (
+            <AuditLogsManager
+              currentUser={currentUser}
+              onOpenEquipmentDetail={(id) => {
+                setSelectedEquipmentQrToken(null);
+                setSelectedEquipmentId(id);
+              }}
+            />
+          )}
+        </Suspense>
       </main>
 
-      {/* Equipment Personal Passport Modal */}
-      <EquipmentDetailModal
-        equipmentId={selectedEquipmentId}
-        qrToken={selectedEquipmentQrToken}
-        currentUser={currentUser}
-        onClose={() => {
-          setSelectedEquipmentId(null);
-          setSelectedEquipmentQrToken(null);
-        }}
-        onEditEquipment={(data) => {
-          setEditEquipmentData(data);
-          setShowFormModal(true);
-        }}
-        onDeleteEquipment={handleDeleteEquipment}
-        onReloadList={() => setRefreshKey((k) => k + 1)}
-        onOpenLogin={() => setShowLoginModal(true)}
-      />
+      <Suspense fallback={null}>
+        {/* Equipment Personal Passport Modal */}
+        <EquipmentDetailModal
+          equipmentId={selectedEquipmentId}
+          qrToken={selectedEquipmentQrToken}
+          currentUser={currentUser}
+          onClose={() => {
+            setSelectedEquipmentId(null);
+            setSelectedEquipmentQrToken(null);
+          }}
+          onEditEquipment={(data) => {
+            setEditEquipmentData(data);
+            setShowFormModal(true);
+          }}
+          onDeleteEquipment={handleDeleteEquipment}
+          onReloadList={() => setRefreshKey((k) => k + 1)}
+          onOpenLogin={() => setShowLoginModal(true)}
+        />
 
-      {/* Equipment Create / Edit Form Modal */}
-      <EquipmentFormModal
-        isOpen={showFormModal}
-        onClose={() => {
-          setShowFormModal(false);
-          setEditEquipmentData(null);
-        }}
-        onSuccess={() => setRefreshKey((k) => k + 1)}
-        onRefreshRooms={fetchRooms}
-        initialData={editEquipmentData}
-        rooms={rooms}
-        types={types}
-      />
+        {/* Equipment Create / Edit Form Modal */}
+        <EquipmentFormModal
+          isOpen={showFormModal}
+          onClose={() => {
+            setShowFormModal(false);
+            setEditEquipmentData(null);
+          }}
+          onSuccess={() => setRefreshKey((k) => k + 1)}
+          onRefreshRooms={fetchRooms}
+          initialData={editEquipmentData}
+          rooms={rooms}
+          types={types}
+        />
 
-      {/* Excel Importer Modal */}
-      <ExcelImportModal
-        isOpen={showExcelModal}
-        onClose={() => setShowExcelModal(false)}
-        onSuccess={() => {
-          setRefreshKey((k) => k + 1);
-          fetchRooms();
-          fetchTypes();
-        }}
-        types={types}
-      />
+        {/* Excel Importer Modal */}
+        <ExcelImportModal
+          isOpen={showExcelModal}
+          onClose={() => setShowExcelModal(false)}
+          onSuccess={() => {
+            setRefreshKey((k) => k + 1);
+            fetchRooms();
+            fetchTypes();
+          }}
+          types={types}
+        />
 
-      {/* QR Scanner Modal */}
-      <QrScannerModal
-        isOpen={showQrScannerModal}
-        currentUser={currentUser}
-        onClose={() => setShowQrScannerModal(false)}
-        onSelectEquipmentId={(id, qrToken) => {
-          setSelectedEquipmentQrToken(qrToken || null);
-          setSelectedEquipmentId(id);
-        }}
-        onSelectGroupCode={(code, qrToken) => {
-          setSelectedGroupQrToken(qrToken || null);
-          setSelectedGroupCode(code);
-        }}
-      />
+        {/* QR Scanner Modal */}
+        <QrScannerModal
+          isOpen={showQrScannerModal}
+          currentUser={currentUser}
+          onClose={() => setShowQrScannerModal(false)}
+          onSelectEquipmentId={(id, qrToken) => {
+            setSelectedEquipmentQrToken(qrToken || null);
+            setSelectedEquipmentId(id);
+          }}
+          onSelectGroupCode={(code, qrToken) => {
+            setSelectedGroupQrToken(qrToken || null);
+            setSelectedGroupCode(code);
+          }}
+        />
 
-      {/* Group Detail Modal */}
-      <GroupDetailModal
-        groupCode={selectedGroupCode}
-        qrToken={selectedGroupQrToken}
-        onClose={() => {
-          setSelectedGroupCode(null);
-          setSelectedGroupQrToken(null);
-        }}
-        onOpenEquipmentDetail={(id, qrToken) => {
-          setSelectedEquipmentQrToken(qrToken || null);
-          setSelectedEquipmentId(id);
-        }}
-        currentUser={currentUser}
-        onReloadList={refreshNotifications}
-      />
+        {/* Group Detail Modal */}
+        <GroupDetailModal
+          groupCode={selectedGroupCode}
+          qrToken={selectedGroupQrToken}
+          onClose={() => {
+            setSelectedGroupCode(null);
+            setSelectedGroupQrToken(null);
+          }}
+          onOpenEquipmentDetail={(id, qrToken) => {
+            setSelectedEquipmentQrToken(qrToken || null);
+            setSelectedEquipmentId(id);
+          }}
+          currentUser={currentUser}
+          onReloadList={refreshNotifications}
+        />
 
-      {/* Notifications Panel */}
-      <NotificationPanel
-        isOpen={showNotifications}
-        onClose={() => setShowNotifications(false)}
-        notifications={notifications}
-        onDismiss={handleDismissNotification}
-        onOpenEquipmentDetail={(id) => {
-          setSelectedEquipmentQrToken(null);
-          setSelectedEquipmentId(id);
-        }}
-      />
+        {/* Notifications Panel */}
+        <NotificationPanel
+          isOpen={showNotifications}
+          onClose={() => setShowNotifications(false)}
+          notifications={notifications}
+          onDismiss={handleDismissNotification}
+          onOpenEquipmentDetail={(id) => {
+            setSelectedEquipmentQrToken(null);
+            setSelectedEquipmentId(id);
+          }}
+        />
+      </Suspense>
 
       {/* Re-Login Modal */}
       <LoginModal
@@ -507,11 +546,13 @@ export default function App() {
       />
 
       {/* Change Own Password Modal */}
-      <ChangePasswordModal
-        isOpen={showChangePasswordModal}
-        onClose={() => setShowChangePasswordModal(false)}
-        currentUser={currentUser}
-      />
+      <Suspense fallback={null}>
+        <ChangePasswordModal
+          isOpen={showChangePasswordModal}
+          onClose={() => setShowChangePasswordModal(false)}
+          currentUser={currentUser}
+        />
+      </Suspense>
     </div>
   );
 }

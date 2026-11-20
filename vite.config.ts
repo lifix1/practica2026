@@ -1,14 +1,28 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
+import { defineConfig } from 'vite';
 
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
+      },
+    },
+    build: {
+      chunkSizeWarningLimit: 650,
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              { name: 'vendor-xlsx', test: /node_modules[\\/]xlsx/ },
+              { name: 'vendor-qr', test: /node_modules[\\/](qrcode|jsqr)/ },
+              { name: 'vendor-react', test: /node_modules[\\/](react|react-dom|scheduler)/ },
+            ],
+          },
+        },
       },
     },
     server: {

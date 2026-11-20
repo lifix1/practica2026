@@ -241,6 +241,24 @@ export async function ensureTablesExist() {
     await db.execute(sql`
       CREATE INDEX IF NOT EXISTS idx_audit_log_severity ON audit_log (severity);
     `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS idx_equipment_type_id ON equipment (type_id);
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS idx_equipment_room_id ON equipment (room_id);
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS idx_equipment_issue_eq_repaired ON equipment_issue (equipment_id, repaired_at);
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS idx_equipment_issue_reported_by ON equipment_issue (reported_by_user_id);
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS idx_equipment_transfer_eq_returned ON equipment_transfer (equipment_id, returned_at);
+    `);
+    await db.execute(sql`
+      CREATE INDEX IF NOT EXISTS idx_notification_user_read ON notification (user_id, is_read);
+    `);
 
     await db.execute(sql`
       CREATE TABLE IF NOT EXISTS writeoff_template (

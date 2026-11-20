@@ -70,7 +70,7 @@ import {
   encodeGroupQrToken,
 } from './src/server/qr-token.ts';
 import { seedDatabaseIfEmpty } from './src/db/seed.ts';
-import { and, asc, desc, eq, gte, ilike, inArray, isNull, lt, lte, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, ilike, inArray, isNull, lt, lte, or, sql } from 'drizzle-orm';
 import path from 'path';
 
 dotenv.config();
@@ -7004,6 +7004,11 @@ async function startServer() {
   // Ensure schema tables exist and initial seed runs BEFORE serving HTTP requests (critical for Neon cold start)
   await seedDatabaseIfEmpty();
 
+  // Ensure unknown API endpoints always return JSON 404 rather than HTML SPA fallback
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint не найден' });
+  });
+
   if (isDev) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -7013,8 +7018,20 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    app.use(
+      '/assets',
+      express.static(path.join(distPath, 'assets'), {
+        maxAge: '7d',
+        immutable: true,
+      })
+    );
+    app.use(
+      express.static(distPath, {
+        index: false,
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
