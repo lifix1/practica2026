@@ -55,6 +55,92 @@ export function clearSessionAuth() {
 
 let refreshInFlight: Promise<boolean> | null = null;
 
+function isHtmlContentType(res: Response): boolean {
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  return ct.includes('text/html');
+}
+
+function isApiUrl(urlStr: string): boolean {
+  return urlStr.startsWith('/api/') || urlStr.includes('/api/');
+}
+
+function buildSyntheticServiceUnavailableResponse(message: string): Response {
+  return new Response(JSON.stringify({ error: message }), {
+    status: 503,
+    statusText: 'Service Unavailable',
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
+  });
+}
+
+export async function safeReadJson<T>(res: Response, fallback: T): Promise<T> {
+  const ct = (res.headers.get('content-type') || '').toLowerCase();
+  if (ct && !ct.includes('application/json') && !ct.includes('+json')) {
+    return fallback;
+  }
+  try {
+    return (await res.json()) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function resilientFetch(
+  input: RequestInfo | URL,
+  makeInit: () => RequestInit
+): Promise<Response> {
+  const urlStr = typeof input === 'string' ? input : input.toString();
+  const initial = makeInit();
+  const method = (initial.method || 'GET').toUpperCase();
+  const isSafeMethod = method === 'GET' || method === 'HEAD';
+  const expectingApiJson = isApiUrl(urlStr);
+  const maxAttempts = isSafeMethod ? 4 : 1;
+  const retryDelaysMs = [500, 1200, 2000];
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (initial.signal?.aborted) {
+      throw new DOMException('Aborted', 'AbortError');
+    }
+
+    try {
+      const res = await fetch(input, attempt === 1 ? initial : makeInit());
+      const transientGateway = res.status === 502 || res.status === 503 || res.status === 504;
+      const unexpectedHtml = expectingApiJson && isHtmlContentType(res);
+
+      if ((transientGateway || unexpectedHtml) && isSafeMethod && attempt < maxAttempts) {
+        await sleep(retryDelaysMs[attempt - 1] ?? 1500);
+        continue;
+      }
+
+      if (unexpectedHtml) {
+        return buildSyntheticServiceUnavailableResponse(
+          'Сервер временно недоступен или перезапускается. Повторите попытку.'
+        );
+      }
+
+      return res;
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || initial.signal?.aborted) {
+        throw err;
+      }
+      if (isSafeMethod && attempt < maxAttempts) {
+        await sleep(retryDelaysMs[attempt - 1] ?? 1500);
+        continue;
+      }
+      return buildSyntheticServiceUnavailableResponse(
+        'Не удалось подключиться к серверу. Проверьте соединение и повторите попытку.'
+      );
+    }
+  }
+
+  return buildSyntheticServiceUnavailableResponse(
+    'Сервер временно недоступен. Повторите попытку.'
+  );
+}
+
 async function tryRefreshSession(): Promise<boolean> {
   if (refreshInFlight) return refreshInFlight;
 
@@ -64,8 +150,8 @@ async function tryRefreshSession(): Promise<boolean> {
         method: 'POST',
         credentials: 'include',
       });
-      if (!res.ok) return false;
-      const data = await res.json().catch(() => null);
+      if (!res.ok || isHtmlContentType(res)) return false;
+      const data = await safeReadJson<{ accessToken?: string; user?: User } | null>(res, null);
       if (data?.accessToken && data?.user) {
         setSessionAuth(data.accessToken, data.user);
         return true;
@@ -100,7 +186,7 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
     };
   };
 
-  let res = await fetch(input, buildInit());
+  let res = await resilientFetch(input, buildInit);
 
   const isAuthEndpoint =
     urlStr.includes('/api/auth/login') ||
@@ -111,16 +197,7 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
     const refreshed = await tryRefreshSession();
     if (refreshed) {
       // Retry original request with refreshed access token
-      const retryHeaders = new Headers(init?.headers);
-      const newToken = getSessionToken();
-      if (newToken) {
-        retryHeaders.set('Authorization', `Bearer ${newToken}`);
-      }
-      res = await fetch(input, {
-        ...init,
-        credentials: init?.credentials || 'include',
-        headers: retryHeaders,
-      });
+      res = await resilientFetch(input, buildInit);
     } else if (typeof window !== 'undefined') {
       clearSessionAuth();
       window.dispatchEvent(new CustomEvent('auth:expired'));

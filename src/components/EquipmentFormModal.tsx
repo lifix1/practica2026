@@ -11,7 +11,7 @@ import {
   MapPin,
 } from 'lucide-react';
 import type { Room, EquipmentType, AdditionalField } from '../types/index.ts';
-import { apiFetch } from '../utils/api.ts';
+import { apiFetch, safeReadJson } from '../utils/api.ts';
 import { flattenTypeTree } from '../utils/typeTree.ts';
 
 interface EquipmentFormModalProps {
@@ -146,7 +146,7 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
       ? `/api/equipment-types/${typeId}/fields`
       : '/api/additional-fields/global';
     apiFetch(endpoint)
-      .then((r) => r.json())
+      .then((r) => (r.ok ? safeReadJson<AdditionalField[]>(r, []) : []))
       .then((fields: AdditionalField[]) => {
         if (cancelled) return;
         const safeFields = Array.isArray(fields) ? fields : [];
@@ -172,7 +172,9 @@ export const EquipmentFormModal: React.FC<EquipmentFormModalProps> = ({
         previousDynamicCodesRef.current = safeFields.map((f) => f.code);
         setDynamicFieldDefs(safeFields);
       })
-      .catch(console.error);
+      .catch(() => {
+        if (!cancelled) setDynamicFieldDefs([]);
+      });
     return () => {
       cancelled = true;
     };

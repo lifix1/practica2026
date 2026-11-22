@@ -13,7 +13,7 @@ import {
   Globe,
 } from 'lucide-react';
 import type { EquipmentType, AdditionalField, User } from '../types/index.ts';
-import { apiFetch } from '../utils/api.ts';
+import { apiFetch, safeReadJson } from '../utils/api.ts';
 import {
   MAX_TYPE_DEPTH,
   buildTypeTreeIndex,
@@ -130,12 +130,11 @@ export const TypesManager: React.FC<TypesManagerProps> = ({
   const fetchGlobalFields = () => {
     setLoadingGlobalFields(true);
     apiFetch('/api/additional-fields/global')
-      .then((r) => r.json())
+      .then((r) => (r.ok ? safeReadJson<AdditionalField[]>(r, []) : []))
       .then((data: AdditionalField[]) =>
         setGlobalFields(Array.isArray(data) ? data : [])
       )
-      .catch((err) => {
-        console.error(err);
+      .catch(() => {
         setGlobalFields([]);
       })
       .finally(() => setLoadingGlobalFields(false));
@@ -149,10 +148,9 @@ export const TypesManager: React.FC<TypesManagerProps> = ({
   const fetchFields = (typeId: number) => {
     setLoadingFields(true);
     apiFetch(`/api/equipment-types/${typeId}/fields`)
-      .then((r) => r.json())
+      .then((r) => (r.ok ? safeReadJson<AdditionalField[]>(r, []) : []))
       .then((data: AdditionalField[]) => setFields(Array.isArray(data) ? data : []))
-      .catch((err) => {
-        console.error(err);
+      .catch(() => {
         setFields([]);
       })
       .finally(() => setLoadingFields(false));

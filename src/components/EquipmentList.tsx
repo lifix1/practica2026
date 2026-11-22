@@ -24,7 +24,7 @@ import {
   Download,
 } from 'lucide-react';
 import type { Equipment, EquipmentType, Room, User, AdditionalField } from '../types/index.ts';
-import { apiFetch } from '../utils/api.ts';
+import { apiFetch, safeReadJson } from '../utils/api.ts';
 import { flattenTypeTree } from '../utils/typeTree.ts';
 import { GroupQrModal } from './GroupQrModal.tsx';
 import { QrSizeSelector, getColumnsForQrSize } from './QrSizeSelector.tsx';
@@ -267,13 +267,25 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
     }
 
     apiFetch(`/api/equipment?${params.toString()}`)
-      .then((res) => res.json())
-      .then((data) => {
+      .then(async (res) => {
+        if (!res.ok) {
+          const err = await safeReadJson<{ error?: string }>(res, {});
+          setActionError(err.error || 'Не удалось загрузить список оборудования');
+          setItems([]);
+          setTotal(0);
+          setTotalPages(1);
+          return;
+        }
+        const data = await safeReadJson<{ items?: Equipment[]; total?: number; totalPages?: number }>(res, {});
         setItems(Array.isArray(data?.items) ? data.items : []);
         setTotal(data?.total || 0);
         setTotalPages(data?.totalPages || 1);
       })
-      .catch(console.error)
+      .catch(() => {
+        setItems([]);
+        setTotal(0);
+        setTotalPages(1);
+      })
       .finally(() => setLoading(false));
   };
 
@@ -323,14 +335,19 @@ export const EquipmentList: React.FC<EquipmentListProps> = ({
       ? `/api/equipment-types/${selectedTypeId}/fields`
       : '/api/additional-fields/global';
     apiFetch(endpoint)
-      .then((r) => r.json())
+      .then(async (r) => {
+        if (!r.ok) return [];
+        return safeReadJson<AdditionalField[]>(r, []);
+      })
       .then((fields: AdditionalField[]) => {
         const filteredFields = Array.isArray(fields)
           ? fields.filter((f) => f.code !== 'dimensions' && f.code !== 'color')
           : [];
         setTypeFields(filteredFields);
       })
-      .catch(console.error);
+      .catch(() => {
+        setTypeFields([]);
+      });
   }, [selectedTypeId, isRegularUser]);
 
   // Selection toggle (preserves selections made on other pages)

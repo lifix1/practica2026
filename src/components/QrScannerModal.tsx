@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { X, Camera, Upload, Search, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
 import jsQR from 'jsqr';
 import type { Equipment, User } from '../types/index.ts';
-import { apiFetch } from '../utils/api.ts';
+import { apiFetch, safeReadJson } from '../utils/api.ts';
 
 interface QrScannerModalProps {
   isOpen: boolean;
@@ -38,12 +38,14 @@ export const QrScannerModal: React.FC<QrScannerModalProps> = ({
     if (isOpen) {
       if (!isRegularUser) {
         apiFetch('/api/equipment?limit=15')
-          .then((r) => r.json())
+          .then((r): Promise<{ items?: Equipment[] }> =>
+            r.ok ? safeReadJson<{ items?: Equipment[] }>(r, { items: [] }) : Promise.resolve({ items: [] })
+          )
           .then((data) => {
             if (Array.isArray(data?.items)) setEquipmentList(data.items);
             else setEquipmentList([]);
           })
-          .catch(console.error);
+          .catch(() => setEquipmentList([]));
       } else {
         setEquipmentList([]);
       }

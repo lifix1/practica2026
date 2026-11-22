@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import type { EquipmentType } from '../types/index.ts';
-import { apiFetch } from '../utils/api.ts';
+import { apiFetch, safeReadJson } from '../utils/api.ts';
 import { flattenTypeTree } from '../utils/typeTree.ts';
 
 interface ExcelImportModalProps {
@@ -124,15 +124,15 @@ export const ExcelImportModal: React.FC<ExcelImportModalProps> = ({
       let extraFields: any[] = [];
       try {
         const res = await apiFetch(`/api/equipment-types/${selectedTypeId}/fields`);
-        const fields = await res.json();
+        const fields = res.ok ? await safeReadJson<any[]>(res, []) : [];
         if (Array.isArray(fields)) {
           extraFields = fields.filter(
             (f) => f.code !== 'dimensions' && f.code !== 'color'
           );
           extraFields.forEach((f) => headers.push(f.code));
         }
-      } catch (e) {
-        console.error(e);
+      } catch {
+        // Fallback without type-specific extra fields
       }
 
       const isFurniture = selectedType?.name.toLowerCase().includes('мебель');

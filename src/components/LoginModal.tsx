@@ -9,7 +9,7 @@ import {
   EyeOff,
 } from 'lucide-react';
 import type { User } from '../types/index.ts';
-import { setSessionAuth } from '../utils/api.ts';
+import { apiFetch, safeReadJson, setSessionAuth } from '../utils/api.ts';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -44,15 +44,15 @@ export const LoginModal: React.FC<LoginModalProps> = ({
     setError(null);
 
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await apiFetch('/api/auth/login', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ login: trimmedLogin, password }),
       });
 
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
+      const data = await safeReadJson<{ error?: string; accessToken?: string; user?: User }>(res, {});
+      if (!res.ok || !data.user) {
         throw new Error(data.error || 'Ошибка входа в систему');
       }
 

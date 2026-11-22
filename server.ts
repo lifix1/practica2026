@@ -7030,6 +7030,20 @@ async function startServer() {
     res.status(404).json({ error: 'API endpoint не найден' });
   });
 
+  // Ensure any middleware errors on /api/* (e.g., malformed/oversized JSON body) return JSON instead of HTML
+  app.use('/api', (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('API middleware error:', err?.message || err);
+    if (res.headersSent) return;
+    const status = typeof err?.status === 'number' && err.status >= 400 && err.status < 600 ? err.status : 500;
+    const message =
+      err?.type === 'entity.parse.failed'
+        ? 'Некорректный формат JSON в теле запроса'
+        : err?.type === 'entity.too.large'
+          ? 'Превышен допустимый размер запроса'
+          : err?.message || 'Внутренняя ошибка сервера';
+    res.status(status).json({ error: message });
+  });
+
   if (isDev) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({

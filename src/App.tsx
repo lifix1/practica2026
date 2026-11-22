@@ -4,7 +4,7 @@ import { Header } from './components/Header.tsx';
 import { EquipmentList } from './components/EquipmentList.tsx';
 import { LoginModal } from './components/LoginModal.tsx';
 import type { User, Room, EquipmentType, NotificationItem } from './types/index.ts';
-import { apiFetch, clearSessionAuth, setSessionAuth } from './utils/api.ts';
+import { apiFetch, clearSessionAuth, getSessionUser, safeReadJson, setSessionAuth } from './utils/api.ts';
 
 const EquipmentDetailModal = lazy(() =>
   import('./components/EquipmentDetailModal.tsx').then((m) => ({ default: m.EquipmentDetailModal }))
@@ -77,13 +77,11 @@ export default function App() {
     try {
       const roomsRes = await apiFetch('/api/rooms');
       if (!roomsRes.ok) {
-        setRooms([]);
         return;
       }
-      const roomsData = await roomsRes.json();
+      const roomsData = await safeReadJson<Room[]>(roomsRes, []);
       setRooms(Array.isArray(roomsData) ? roomsData : []);
-    } catch (e) {
-      console.error('Rooms error:', e);
+    } catch {
       setRooms([]);
     }
   }, []);
@@ -92,13 +90,11 @@ export default function App() {
     try {
       const typesRes = await apiFetch('/api/equipment-types');
       if (!typesRes.ok) {
-        setTypes([]);
         return;
       }
-      const typesData = await typesRes.json();
+      const typesData = await safeReadJson<EquipmentType[]>(typesRes, []);
       setTypes(Array.isArray(typesData) ? typesData : []);
-    } catch (e) {
-      console.error('Types error:', e);
+    } catch {
       setTypes([]);
     }
   }, []);
@@ -107,10 +103,10 @@ export default function App() {
     try {
       const res = await apiFetch('/api/inventory/current');
       if (!res.ok) return;
-      const data = await res.json();
-      setHasActiveAudit(Boolean(data.activeInventory));
-    } catch (e) {
-      console.error(e);
+      const data = await safeReadJson<{ activeInventory?: unknown }>(res, {});
+      setHasActiveAudit(Boolean(data?.activeInventory));
+    } catch {
+      // Ignore transient polling failures
     }
   }, []);
 
@@ -118,10 +114,10 @@ export default function App() {
     try {
       const res = await apiFetch('/api/notifications');
       if (!res.ok) return;
-      const data = await res.json();
+      const data = await safeReadJson<NotificationItem[]>(res, []);
       setNotifications(Array.isArray(data) ? data : []);
-    } catch (e) {
-      console.error(e);
+    } catch {
+      // Ignore transient polling failures
     }
   }, []);
 
@@ -130,16 +126,20 @@ export default function App() {
     setAuthChecking(true);
     try {
       const res = await apiFetch('/api/auth/me');
-      const data = await res.json().catch(() => ({ user: null }));
-      if (data.user) {
+      if (res.status >= 500) {
+        const cachedUser = getSessionUser();
+        setCurrentUser(cachedUser);
+        return;
+      }
+      const data = await safeReadJson<{ user?: User | null }>(res, { user: null });
+      if (data?.user) {
         setCurrentUser(data.user);
         setSessionAuth(null, data.user);
       } else {
         clearSessionAuth();
         setCurrentUser(null);
       }
-    } catch (e) {
-      console.error('Auth error:', e);
+    } catch {
       clearSessionAuth();
       setCurrentUser(null);
     } finally {
@@ -199,7 +199,7 @@ export default function App() {
       apiFetch(`/api/equipment/resolve/${encodeURIComponent(code)}`)
         .then(async (res) => {
           if (!res.ok) return null;
-          return res.json();
+          return safeReadJson<any>(res, null);
         })
         .then((resolved) => {
           if (cancelled || !resolved) return;
